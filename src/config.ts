@@ -28,4 +28,8 @@ export const config = {
   reconciliation: {
     intervalMs: num(process.env.RECONCILIATION_INTERVAL_MS, 120_000),
   },
+  supabase: {
+    url: process.env.SUPABASE_URL || undefined,
+    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || undefined,
+  },
 };

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AlertNotifier } from "../../src/adapters/alerting/AlertNotifier.js";
+import { InMemoryAuditTrail } from "../../src/adapters/audit/AuditTrail.js";
+import { InMemoryMetrics } from "../../src/adapters/metrics/Metrics.js";
 import type { AppNotifier } from "../../src/adapters/notifier/AppNotifier.js";
 import type { EmailSender } from "../../src/adapters/email/EmailSender.js";
 import type { NFSeClient, NFSeEmissionResult } from "../../src/adapters/nfse/NFSeClient.js";
@@ -45,6 +47,8 @@ function makeService(
   const emailSender = opts.emailSender ?? fakeEmailSender();
   const appNotifier = opts.appNotifier ?? fakeAppNotifier();
   const alertNotifier = opts.alertNotifier ?? fakeAlertNotifier();
+  const auditTrail = new InMemoryAuditTrail();
+  const metrics = new InMemoryMetrics();
 
   const service = new InvoiceEmissionService({
     invoiceRepository,
@@ -53,11 +57,17 @@ function makeService(
     emailSender,
     appNotifier,
     alertNotifier,
+    auditTrail,
+    metrics,
     retryOptions: { maxAttempts: 3, baseDelayMs: 1, sleep: async () => {} },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });
 
-  return { service, invoiceRepository, emailSender, appNotifier, alertNotifier };
+  return { service, invoiceRepository, emailSender, appNotifier, alertNotifier, auditTrail, metrics };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe("InvoiceEmissionService", () => {
@@ -91,6 +101,18 @@ describe("InvoiceEmissionService", () => {
     expect(nfseClient.emit).toHaveBeenCalledTimes(1);
   });
 
+  it("nao cria duas invoices quando o mesmo pagamento chega concorrentemente (race condition)", async () => {
+    const nfseClient: NFSeClient = { emit: vi.fn().mockResolvedValue(successResult), cancel: vi.fn() };
+    const { service, invoiceRepository } = makeService(nfseClient);
+
+    const event = makeEvent();
+    const [first, second] = await Promise.all([service.processPayment(event), service.processPayment(event)]);
+
+    expect(first.id).toBe(second.id);
+    expect(nfseClient.emit).toHaveBeenCalledTimes(1);
+    expect((await invoiceRepository.list())).toHaveLength(1);
+  });
+
   it("tenta novamente em caso de falha transitoria e emite com sucesso", async () => {
     const emit = vi
       .fn()
@@ -106,13 +128,14 @@ describe("InvoiceEmissionService", () => {
 
   it("marca a invoice como failed e dispara alerta quando todas as tentativas se esgotam", async () => {
     const emit = vi.fn().mockRejectedValue(new NFSeEmissionError("prefeitura fora do ar"));
-    const { service, alertNotifier } = makeService({ emit, cancel: vi.fn() });
+    const { service, alertNotifier, metrics } = makeService({ emit, cancel: vi.fn() });
 
     const invoice = await service.processPayment(makeEvent());
 
     expect(invoice.status).toBe("failed");
     expect(invoice.lastError).toContain("prefeitura fora do ar");
     expect(alertNotifier.send).toHaveBeenCalledWith(expect.objectContaining({ severity: "critical" }));
+    expect(metrics.snapshot().counters["invoices.failed"]).toBe(1);
   });
 
   it("marca a invoice como failed e dispara alerta quando o paciente nao e encontrado (dado inconsistente)", async () => {
@@ -125,6 +148,33 @@ describe("InvoiceEmissionService", () => {
     expect(invoice.doctorId).toBeNull();
     expect(nfseClient.emit).not.toHaveBeenCalled();
     expect(alertNotifier.send).toHaveBeenCalledWith(expect.objectContaining({ severity: "critical" }));
+  });
+
+  it("registra a trilha de auditoria e as metricas de uma emissao bem-sucedida", async () => {
+    const nfseClient: NFSeClient = { emit: vi.fn().mockResolvedValue(successResult), cancel: vi.fn() };
+    const { service, auditTrail, metrics } = makeService(nfseClient);
+
+    const invoice = await service.processPayment(makeEvent());
+
+    const entries = await auditTrail.listForInvoice(invoice.id);
+    expect(entries.map((e) => e.eventType)).toEqual(["created", "issued"]);
+    expect(metrics.snapshot().counters["invoices.issued"]).toBe(1);
+    expect(metrics.snapshot().durations["nfse.emit.duration_ms"]?.count).toBe(1);
+  });
+
+  describe("acceptPaymentAsync", () => {
+    it("retorna rapido com status processing e finaliza a emissao em background", async () => {
+      const emit = vi.fn().mockImplementation(() => delay(20).then(() => successResult));
+      const { service, invoiceRepository } = makeService({ emit, cancel: vi.fn() });
+
+      const accepted = await service.acceptPaymentAsync(makeEvent());
+      expect(accepted.status).toBe("processing");
+
+      await delay(60);
+
+      const final = await invoiceRepository.findById(accepted.id);
+      expect(final?.status).toBe("issued");
+    });
   });
 
   describe("recoverStuckInvoices", () => {

@@ -3,6 +3,8 @@ import path from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import type { Alert } from "../adapters/alerting/AlertNotifier.js";
+import type { AuditTrail } from "../adapters/audit/AuditTrail.js";
+import type { Metrics } from "../adapters/metrics/Metrics.js";
 import { normalizeSecondGatewayEvent, normalizeStripeEvent, normalizeStripeRefundEvent } from "../adapters/paymentGateway/normalize.js";
 import type { MockReconciliationGateway } from "../adapters/reconciliation/ReconciliationGateway.js";
 import { SecondGatewayEventSchema, StripeEventSchema } from "../adapters/paymentGateway/schemas.js";
@@ -43,6 +45,10 @@ export interface CreateAppDeps {
   reconciliation?: ReconciliationDeps;
   /** Limite (ms) usado por defeito em POST /debug/recover-stuck quando nenhum "olderThanMs" e enviado. */
   recoveryDefaultThresholdMs?: number;
+  /** Se presente, expoe GET /invoices/:id/audit. */
+  auditTrail?: AuditTrail;
+  /** Se presente, expoe GET /metrics. */
+  metrics?: Metrics;
 }
 
 const FailureRateSchema = z.object({ rate: z.number().min(0).max(1) });
@@ -100,7 +106,10 @@ export function createApp(deps: CreateAppDeps): Express {
 
     const event = StripeEventSchema.parse(req.body);
     if (event.type === "payment_intent.succeeded") {
-      const invoice = await deps.invoiceEmissionService.processPayment(normalizeStripeEvent(event));
+      // Ack rapido: associa paciente/medico e garante idempotencia aqui, mas
+      // a emissao (que pode levar segundos com retentativas) roda em
+      // background para nao arriscar o Stripe considerar o webhook expirado.
+      const invoice = await deps.invoiceEmissionService.acceptPaymentAsync(normalizeStripeEvent(event));
       res.status(202).json(invoice);
       return;
     }
@@ -121,7 +130,7 @@ export function createApp(deps: CreateAppDeps): Express {
     }
 
     const event = SecondGatewayEventSchema.parse(req.body);
-    const invoice = await deps.invoiceEmissionService.processPayment(normalizeSecondGatewayEvent(event));
+    const invoice = await deps.invoiceEmissionService.acceptPaymentAsync(normalizeSecondGatewayEvent(event));
     res.status(202).json(invoice);
   }));
 
@@ -147,6 +156,20 @@ export function createApp(deps: CreateAppDeps): Express {
     }
     res.json(invoice);
   }));
+
+  if (deps.auditTrail) {
+    const auditTrail = deps.auditTrail;
+    app.get("/invoices/:id/audit", asyncHandler(async (req, res) => {
+      res.json(await auditTrail.listForInvoice(req.params.id ?? ""));
+    }));
+  }
+
+  if (deps.metrics) {
+    const metrics = deps.metrics;
+    app.get("/metrics", (_req, res) => {
+      res.json(metrics.snapshot());
+    });
+  }
 
   app.post("/debug/recover-stuck", asyncHandler(async (req, res) => {
     const { olderThanMs } = RecoverStuckSchema.parse(req.body ?? {});

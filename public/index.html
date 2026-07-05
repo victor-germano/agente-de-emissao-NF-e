@@ -100,6 +100,14 @@
   .alert-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
   .alert-item .alert-title { font-weight: 600; }
   .alert-item .alert-message { color: var(--muted); white-space: normal; }
+  .metrics-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  .metric-tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; min-width: 120px; }
+  .metric-tile .metric-value { font-size: 20px; font-weight: 700; }
+  .metric-tile .metric-label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  button.link { background: none; border: none; color: var(--accent); padding: 2px 4px; font-weight: 600; cursor: pointer; }
+  .audit-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .audit-entry { border-left: 3px solid var(--accent); padding: 4px 10px; font-size: 13px; }
+  .audit-entry .audit-meta { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -201,11 +209,19 @@
     </section>
   </div>
 
-  <section class="panel">
-    <h2>Alertas recentes</h2>
-    <div id="alerts-list" class="alert-list"></div>
-    <div id="alerts-empty" class="empty" style="display:none">Nenhum alerta gerado ainda.</div>
-  </section>
+  <div class="grid-2">
+    <section class="panel">
+      <h2>Alertas recentes</h2>
+      <div id="alerts-list" class="alert-list"></div>
+      <div id="alerts-empty" class="empty" style="display:none">Nenhum alerta gerado ainda.</div>
+    </section>
+
+    <section class="panel">
+      <h2>Métricas</h2>
+      <div id="metrics-grid" class="metrics-grid"></div>
+      <div id="metrics-empty" class="empty" style="display:none">Nenhuma metrica registrada ainda.</div>
+    </section>
+  </div>
 
   <section class="panel">
     <div class="top-row">
@@ -224,11 +240,16 @@
             <th>Tentativas</th>
             <th>Nº NFS-e</th>
             <th>Erro / motivo</th>
+            <th>Auditoria</th>
           </tr>
         </thead>
         <tbody id="invoices-body"></tbody>
       </table>
       <div id="empty-state" class="empty" style="display:none">Nenhuma nota processada ainda — simule um pagamento acima.</div>
+    </div>
+    <div id="audit-panel" style="display:none">
+      <p class="hint">Auditoria da nota <span id="audit-invoice-id"></span>:</p>
+      <div id="audit-list" class="audit-list"></div>
     </div>
   </section>
 </main>
@@ -430,6 +451,7 @@
             "<td>" + inv.attempts + "</td>" +
             "<td>" + (inv.nfseNumber || "—") + "</td>" +
             '<td class="error-cell">' + (inv.lastError || inv.cancellationReason || "") + "</td>" +
+            '<td><button type="button" class="link" onclick="showAudit(\'' + inv.id + '\')">ver</button></td>' +
             "</tr>"
           );
         })
@@ -479,9 +501,51 @@
       .join("");
   }
 
+  async function loadMetrics() {
+    const res = await fetch("/metrics");
+    if (!res.ok) return;
+    const { counters, durations } = await res.json();
+    const grid = document.getElementById("metrics-grid");
+    const empty = document.getElementById("metrics-empty");
+
+    const counterTiles = Object.entries(counters).map(
+      ([name, value]) => '<div class="metric-tile"><div class="metric-value">' + value + '</div><div class="metric-label">' + name + "</div></div>",
+    );
+    const durationTiles = Object.entries(durations).map(
+      ([name, d]) =>
+        '<div class="metric-tile"><div class="metric-value">' + d.avgMs + "ms</div><div class=\"metric-label\">" + name + " (media, " + d.count + ")</div></div>",
+    );
+    const tiles = [...counterTiles, ...durationTiles];
+
+    if (tiles.length === 0) {
+      grid.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+    grid.innerHTML = tiles.join("");
+  }
+
+  window.showAudit = async function showAudit(invoiceId) {
+    const res = await fetch("/invoices/" + invoiceId + "/audit");
+    const entries = await res.json();
+    document.getElementById("audit-panel").style.display = "block";
+    document.getElementById("audit-invoice-id").textContent = invoiceId;
+    document.getElementById("audit-list").innerHTML = entries
+      .map(
+        (entry) =>
+          '<div class="audit-entry">' +
+          "<div>" + entry.eventType + ": " + (entry.fromStatus || "—") + " → " + entry.toStatus + "</div>" +
+          '<div class="audit-meta">' + formatTime(entry.createdAt) + " — " + entry.message + "</div>" +
+          "</div>",
+      )
+      .join("");
+  };
+
   function refreshAll() {
     loadInvoices();
     loadAlerts();
+    loadMetrics();
   }
 
   document.getElementById("refresh").addEventListener("click", refreshAll);

@@ -3,6 +3,8 @@ import type { Express } from "express";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { InMemoryAlertNotifier } from "../../src/adapters/alerting/AlertNotifier.js";
+import { InMemoryAuditTrail } from "../../src/adapters/audit/AuditTrail.js";
+import { InMemoryMetrics } from "../../src/adapters/metrics/Metrics.js";
 import { createApp } from "../../src/api/createApp.js";
 import { ConsoleEmailSender } from "../../src/adapters/email/EmailSender.js";
 import { HttpAppNotifier } from "../../src/adapters/notifier/AppNotifier.js";
@@ -16,6 +18,8 @@ import { ReconciliationService } from "../../src/services/ReconciliationService.
 function buildTestApp(opts: { stripeWebhookSecret?: string; gateway2WebhookSecret?: string } = {}) {
   const invoiceRepository = new InMemoryInvoiceRepository();
   const alertNotifier = new InMemoryAlertNotifier();
+  const auditTrail = new InMemoryAuditTrail();
+  const metrics = new InMemoryMetrics();
   const invoiceEmissionService = new InvoiceEmissionService({
     invoiceRepository,
     patientDoctorRepository: new InMemoryPatientDoctorRepository(),
@@ -23,6 +27,8 @@ function buildTestApp(opts: { stripeWebhookSecret?: string; gateway2WebhookSecre
     emailSender: new ConsoleEmailSender(),
     appNotifier: new HttpAppNotifier(undefined),
     alertNotifier,
+    auditTrail,
+    metrics,
     retryOptions: { maxAttempts: 3, baseDelayMs: 1 },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });
@@ -41,9 +47,11 @@ function buildTestApp(opts: { stripeWebhookSecret?: string; gateway2WebhookSecre
     alertFeed: alertNotifier,
     webhookSecurity: { stripeWebhookSecret: opts.stripeWebhookSecret, gateway2WebhookSecret: opts.gateway2WebhookSecret },
     reconciliation: { service: reconciliationService, gateway: reconciliationGateway },
+    auditTrail,
+    metrics,
   });
 
-  return { app, alertNotifier, invoiceRepository };
+  return { app, alertNotifier, invoiceRepository, auditTrail, metrics };
 }
 
 function stripeSignatureHeader(payload: string, secret: string, timestamp = Math.floor(Date.now() / 1000)): string {
@@ -51,8 +59,18 @@ function stripeSignatureHeader(payload: string, secret: string, timestamp = Math
   return `t=${timestamp},v1=${signature}`;
 }
 
+async function waitForInvoiceStatus(app: Express, invoiceId: string, status: string, timeoutMs = 1000): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const response = await request(app).get(`/invoices/${invoiceId}`);
+    if (response.body.status === status) return response.body;
+    if (Date.now() > deadline) throw new Error(`Timeout esperando invoice ${invoiceId} chegar em "${status}" (atual: ${response.body.status})`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("POST /webhooks/stripe", () => {
-  it("processa um evento valido e a nota fica disponivel via GET /invoices/:id", async () => {
+  it("responde rapido com status processing e a nota fica issued pouco depois (ack desacoplado)", async () => {
     const { app } = buildTestApp();
 
     const webhookResponse = await request(app)
@@ -71,11 +89,10 @@ describe("POST /webhooks/stripe", () => {
       });
 
     expect(webhookResponse.status).toBe(202);
-    expect(webhookResponse.body.status).toBe("issued");
+    expect(webhookResponse.body.status).toBe("processing");
 
-    const getResponse = await request(app).get(`/invoices/${webhookResponse.body.id}`);
-    expect(getResponse.status).toBe(200);
-    expect(getResponse.body.nfseNumber).toBeDefined();
+    const finalInvoice = await waitForInvoiceStatus(app, webhookResponse.body.id, "issued");
+    expect(finalInvoice.nfseNumber).toBeDefined();
   });
 
   it("rejeita payload invalido com 400", async () => {
@@ -94,7 +111,7 @@ describe("POST /webhooks/stripe", () => {
         type: "payment_intent.succeeded",
         data: { object: { id: "pi_456", amount: 10000, currency: "brl", metadata: { patient_id: "pat_1" } } },
       });
-    expect(paid.body.status).toBe("issued");
+    await waitForInvoiceStatus(app, paid.body.id, "issued");
 
     const refunded = await request(app)
       .post("/webhooks/stripe")
@@ -160,7 +177,8 @@ describe("POST /webhooks/gateway2", () => {
       });
 
     expect(response.status).toBe(202);
-    expect(response.body.status).toBe("issued");
+    expect(response.body.status).toBe("processing");
+    await waitForInvoiceStatus(app, response.body.id, "issued");
   });
 
   it("rejeita requisicao sem o segredo correto quando GATEWAY2_WEBHOOK_SECRET esta configurado", async () => {
@@ -224,5 +242,43 @@ describe("GET /alerts", () => {
     expect(alerts.status).toBe(200);
     expect(alerts.body.length).toBeGreaterThan(0);
     expect(alerts.body[0].severity).toBe("critical");
+  });
+});
+
+describe("GET /invoices/:id/audit", () => {
+  it("lista a trilha de auditoria da invoice apos a emissao", async () => {
+    const { app } = buildTestApp();
+
+    const response = await request(app)
+      .post("/webhooks/stripe")
+      .send({
+        id: "evt_audit",
+        type: "payment_intent.succeeded",
+        data: { object: { id: "pi_audit", amount: 7000, currency: "brl", metadata: { patient_id: "pat_1" } } },
+      });
+    await waitForInvoiceStatus(app, response.body.id, "issued");
+
+    const audit = await request(app).get(`/invoices/${response.body.id}/audit`);
+    expect(audit.status).toBe(200);
+    expect(audit.body.map((entry: { eventType: string }) => entry.eventType)).toEqual(["created", "issued"]);
+  });
+});
+
+describe("GET /metrics", () => {
+  it("reflete contadores apos uma emissao bem-sucedida", async () => {
+    const { app } = buildTestApp();
+
+    const response = await request(app)
+      .post("/webhooks/stripe")
+      .send({
+        id: "evt_metrics",
+        type: "payment_intent.succeeded",
+        data: { object: { id: "pi_metrics", amount: 3000, currency: "brl", metadata: { patient_id: "pat_1" } } },
+      });
+    await waitForInvoiceStatus(app, response.body.id, "issued");
+
+    const metrics = await request(app).get("/metrics");
+    expect(metrics.status).toBe(200);
+    expect(metrics.body.counters["invoices.issued"]).toBe(1);
   });
 });

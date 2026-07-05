@@ -5,16 +5,27 @@ Protótipo do agente que implementa o fluxo **TO-BE** descrito em
 pagamento, associa automaticamente paciente + médico, emite a NFS-e junto
 à Prefeitura de Marília, envia o PDF por e-mail e notifica o App.
 
-## Por que tudo mockado nas bordas
+## Por que a maioria das bordas é mockada (mas a persistência é real)
 
-Este é um teste técnico, sem credenciais reais de Stripe/Supabase/Prefeitura
-de Marília. Em vez de simular uma integração real com dados falsos, o
-sistema foi desenhado com **interfaces (ports) explícitas** em cada ponto de
+Este é um teste técnico, sem credenciais reais de Stripe/Prefeitura de
+Marília. Em vez de simular essas integrações com dados falsos, o sistema
+foi desenhado com **interfaces (ports) explícitas** em cada ponto de
 integração externa (`NFSeClient`, `EmailSender`, `AppNotifier`,
-`PatientDoctorRepository`, `InvoiceRepository`). Hoje cada uma tem uma
-implementação mock/in-memory; trocar por uma integração real é implementar
-a interface e injetar em `src/index.ts` — nenhuma outra parte do sistema
-muda. Essa é a decisão de arquitetura mais importante do projeto.
+`PatientDoctorRepository`, `InvoiceRepository`). Trocar uma implementação
+mock por uma real é implementar a interface e injetar em `src/index.ts` —
+nenhuma outra parte do sistema muda. Essa é a decisão de arquitetura mais
+importante do projeto.
+
+A persistência é a exceção: existe um **projeto Supabase real** criado
+para este agente (Postgres gerenciado, schema já aplicado — tabelas
+`patients`, `doctors`, `consultations`, `invoices`, `invoice_audit_log`,
+com RLS habilitado). `SupabaseInvoiceRepository`,
+`SupabasePatientDoctorRepository` e `SupabaseAuditTrail` são
+implementações completas, não placeholders. O app detecta em runtime se
+`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` estão configuradas
+(`src/index.ts`) e usa Postgres de verdade; caso contrário, cai para as
+implementações in-memory — útil para rodar o painel local sem depender de
+rede. Ver "Ativando a persistência real" abaixo.
 
 ## Fluxo implementado (TO-BE)
 
@@ -48,7 +59,7 @@ POST /webhooks/stripe            POST /webhooks/gateway2 (Pix/parcelado)
 | Etapa do TO-BE | Implementação |
 |---|---|
 | 1-2. Stripe / 2º gateway → App | `POST /webhooks/stripe` e `POST /webhooks/gateway2`, cada um com seu parser (`src/adapters/paymentGateway`) normalizando para `PaymentEvent` |
-| 3. Associação automática médico+valor | `PatientDoctorRepository.findLastDoctorForPatient` (hoje in-memory; ver seção abaixo para Supabase) |
+| 3. Associação automática médico+valor | `PatientDoctorRepository.findLastDoctorForPatient` — real via Supabase (tabela `consultations`) quando configurado, senão in-memory |
 | 4. Disparo da emissão | `InvoiceEmissionService` chama `NFSeClient.emit` |
 | 4 (integração c/ prefeitura) | `NFSeClient` — interface; `PrefeituraMariliaMockClient` simula latência e falhas |
 | 5. Nota (PDF) retorna e reflete no sistema | `Invoice.pdfUrl` / `Invoice.nfseNumber` persistidos via `InvoiceRepository` |
@@ -71,7 +82,8 @@ POST /webhooks/stripe            POST /webhooks/gateway2 (Pix/parcelado)
   registrado, em vez de lançar exceção silenciosa.
 - **Idempotência**: cada `PaymentEvent.externalId` só gera uma invoice —
   reprocessar o mesmo webhook (comum em retries de gateways de pagamento)
-  não duplica a nota.
+  não duplica a nota, mesmo sob concorrência real (`InvoiceRepository.findOrCreate`,
+  ver seção abaixo).
 - **Segundo gateway (Pix/parcelado)**: modelado como um endpoint e schema
   próprios (`POST /webhooks/gateway2`), já usando o mesmo pipeline —
   quando esse gateway existir de fato, é só apontar o webhook dele para essa
@@ -108,6 +120,45 @@ adições cobrem isso:
    localiza a invoice pelo `payment_intent` original, cancela a NFS-e já
    emitida (`NFSeClient.cancel`) e avisa o paciente por e-mail. Sem isso, um
    reembolso deixaria uma nota fiscal órfã no sistema.
+6. **Persistência real (Supabase)** — as adições de resiliência acima (1 e
+   2, principalmente) só valem a pena de verdade quando o estado sobrevive
+   a um restart/crash do processo. `SupabaseInvoiceRepository`,
+   `SupabasePatientDoctorRepository` e `SupabaseAuditTrail`
+   (`src/repositories`, `src/adapters/audit`) implementam as mesmas
+   interfaces contra um projeto Supabase real. Detalhes em "Ativando a
+   persistência real".
+7. **Corrida na idempotência** — o `findOrCreate` original (checar
+   existência, depois criar) tinha uma janela real de corrida: dois
+   webhooks do mesmo pagamento chegando quase simultaneamente (comum em
+   retries de gateway) podiam ambos passar pela checagem antes de qualquer
+   um persistir, gerando duas notas. `InvoiceRepository.findOrCreate`
+   agora resolve isso de duas formas: em memória, via um mapa de
+   "criações em andamento" que serializa chamadas concorrentes para a
+   mesma chave (`src/repositories/InvoiceRepository.ts`); no Supabase, via
+   `INSERT` + constraint `UNIQUE(payment_external_id)` no banco — a
+   atomicidade real vem do Postgres, não de um mutex simulado. Coberto por
+   teste de concorrência (`Promise.all` com o mesmo evento).
+8. **Trilha de auditoria imutável** (`AuditTrail`, `src/adapters/audit`) —
+   como isso lida com dados de saúde e documentos fiscais, cada transição
+   de estado da nota (criada, emitida, falhou, cancelada, recuperada) fica
+   registrada num log append-only, separado do registro mutável da
+   invoice — relevante para rastreabilidade/compliance. Consultável via
+   `GET /invoices/:id/audit`.
+9. **Ack rápido no webhook** (`InvoiceEmissionService.acceptPaymentAsync`)
+   — antes, `POST /webhooks/stripe` só respondia depois que a emissão
+   (com todas as retentativas, podendo levar segundos) terminava. Isso
+   arrisca o Stripe considerar a entrega expirada e reenviar o mesmo
+   evento. Agora o handler resolve idempotência + associação
+   paciente/médico (rápido) e responde `202` com a nota ainda em
+   `"processing"`, enquanto a emissão continua em background — o
+   consumidor deve consultar `GET /invoices/:id` ou aguardar a notificação
+   do App para saber o resultado final. `processPayment` (síncrono)
+   continua existindo para quem precisa do resultado final na hora (ex:
+   reconciliação, recuperação de travadas, testes).
+10. **Métricas básicas** (`Metrics`, `src/adapters/metrics`) — contadores
+    de notas emitidas/falhas/canceladas/recuperadas e a duração média da
+    emissão, expostos via `GET /metrics`. Sem isso, a saúde da automação só
+    é percebida quando um alerta de falha dispara.
 
 ## Rodando localmente
 
@@ -117,6 +168,24 @@ cp .env.example .env
 npm run dev        # http://localhost:3000
 ```
 
+### Ativando a persistência real (Supabase)
+
+Existe um projeto Supabase já criado e com o schema aplicado
+(`vyx-nf-agent`, plano gratuito). Para o app usar Postgres de verdade em
+vez de in-memory:
+
+1. Abra https://supabase.com/dashboard/project/nlyiesaskjvwiwdgscxl/settings/api-keys
+2. Copie o `service_role` secret key
+3. Cole em `SUPABASE_SERVICE_ROLE_KEY` no seu `.env` (`SUPABASE_URL` já vem
+   preenchida no `.env.example`)
+4. Reinicie o servidor — o log de startup mostra qual modo está ativo
+   (`Persistencia real via Supabase` ou `Persistencia in-memory`)
+
+O `service_role` key **nunca** é obtido por automação/MCP — é um segredo
+que só o dono da conta pode copiar do dashboard. Sem ele preenchido, tudo
+funciona normalmente em memória (comportamento padrão, inclusive nos
+testes automatizados).
+
 ### Painel visual
 
 Abrindo `http://localhost:3000` no navegador (servido pelo próprio Express a
@@ -124,9 +193,11 @@ partir de `public/index.html`, sem build/framework) você tem: formulário
 para simular pagamentos (Stripe ou segundo gateway); controle para forçar a
 taxa de falha do mock da Prefeitura; simulação de nota travada + botão de
 recuperação; simulação de pagamento perdido + botão de reconciliação;
-simulação de estorno sobre uma nota já emitida; feed de alertas recentes; e
-a tabela de notas processadas — tudo atualizado a cada 2s. Os dados são
-in-memory: reiniciar o servidor limpa tudo.
+simulação de estorno sobre uma nota já emitida; feed de alertas recentes;
+painel de métricas; e a tabela de notas processadas (com link "ver" por
+linha para a trilha de auditoria) — tudo atualizado a cada 2s. Com
+persistência in-memory, reiniciar o servidor limpa tudo; com Supabase
+configurado, os dados sobrevivem a restarts.
 
 Simular um pagamento Stripe via curl (alternativa ao painel):
 
@@ -156,11 +227,16 @@ curl -X POST http://localhost:3000/webhooks/gateway2 \
 ```
 
 Consultar: `GET /invoices`, `GET /invoices/:id`, `GET /invoices/failed`,
-`GET /alerts`.
+`GET /invoices/:id/audit`, `GET /alerts`, `GET /metrics`.
 
 Outros endpoints de debug/operação: `POST /debug/simulate-stuck-invoice`,
 `POST /debug/recover-stuck`, `POST /debug/simulate-missed-payment`,
 `POST /reconciliation/run`.
+
+Note que `POST /webhooks/stripe` e `POST /webhooks/gateway2` respondem
+`202` com a invoice em `status: "processing"` quase imediatamente — a
+emissão roda em background (ver item 9 acima). Consulte `GET /invoices/:id`
+logo em seguida para ver o resultado final (`issued`/`failed`).
 
 Para testar o cenário de falha/retry, ajuste `NFSE_MOCK_FAILURE_RATE` no
 `.env` (ex: `0.5`) e observe os `attempts` na resposta.
@@ -176,20 +252,22 @@ npm run typecheck
 npm test
 ```
 
-Cobrem: retry/backoff, associação automática médico+paciente, idempotência,
-emissão com falha transitória seguida de sucesso, falha após esgotar
-tentativas, dados inconsistentes, os dois webhooks HTTP fim a fim,
-recuperação de notas travadas, estorno/cancelamento, reconciliação e
-verificação de assinatura do Stripe (assinatura válida, adulterada, segredo
-errado, timestamp expirado).
+Cobrem: retry/backoff, associação automática médico+paciente, idempotência
+(incluindo concorrência real via `Promise.all` no mesmo pagamento), emissão
+com falha transitória seguida de sucesso, falha após esgotar tentativas,
+dados inconsistentes, os dois webhooks HTTP fim a fim (com o ack
+desacoplado — resposta rápida em `processing`, resultado final via
+polling), recuperação de notas travadas, estorno/cancelamento,
+reconciliação, verificação de assinatura do Stripe (assinatura válida,
+adulterada, segredo errado, timestamp expirado), trilha de auditoria e
+métricas. Rodam sempre contra as implementações in-memory — não tocam o
+Supabase real.
 
 ## Como plugar as integrações reais
 
-- **Supabase**: implementar `PatientDoctorRepository` e `InvoiceRepository`
-  usando `@supabase/supabase-js` (tabelas `patients`, `doctors`,
-  `consultations`, `invoices`), reaproveitando as variáveis já previstas em
-  `.env.example` (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`), e trocar a
-  instância em `src/index.ts`.
+- **Supabase**: já implementado e com projeto real criado — só falta
+  preencher `SUPABASE_SERVICE_ROLE_KEY` (ver "Ativando a persistência
+  real").
 - **Stripe real**: a verificação de assinatura já está implementada
   (`verifyStripeSignature`) — basta configurar `STRIPE_WEBHOOK_SECRET` com o
   segredo real do endpoint.
@@ -198,19 +276,26 @@ errado, timestamp expirado).
   mantendo a mesma assinatura `emit(request): Promise<NFSeEmissionResult>`.
 - **E-mail real**: trocar `ConsoleEmailSender` por um provedor
   (SES/SendGrid/SMTP) implementando `EmailSender`.
+- **Alertas reais**: trocar/complementar `InMemoryAlertNotifier` por uma
+  implementação que posta num webhook do Slack/PagerDuty — mesma interface
+  `AlertNotifier`.
 
 ## Não incluído (fora do escopo deste protótipo)
 
 - Automação do segundo gateway de pagamento em produção (o endpoint já
   existe; falta a integração real, item citado no documento como "próximo
   passo futuro").
-- Persistência real (Postgres/Supabase) — hoje in-memory, reiniciar o
-  processo limpa os dados (inclusive os "presos em processing" simulados
-  para o debug).
 - Autenticação/autorização dos endpoints de consulta e debug (`/invoices`,
-  `/alerts`, `/debug/*`) — só os webhooks de pagamento têm verificação de
-  origem (assinatura Stripe / segredo compartilhado).
+  `/alerts`, `/metrics`, `/debug/*`) — só os webhooks de pagamento têm
+  verificação de origem (assinatura Stripe / segredo compartilhado). Em
+  produção, esses endpoints de operação precisariam ficar atrás de auth.
 - Reconciliação real com a API do Stripe — `ReconciliationGateway` é mockado
   (lista o que foi injetado via `/debug/simulate-missed-payment`); em
   produção, implementaria `listRecentSuccessfulPayments` consultando
   `stripe.charges.list` ou similar.
+- Ack rápido também no cancelamento por estorno (`processRefund` continua
+  síncrono) — menos crítico porque é um único `cancel`, não uma cadeia de
+  retentativas de emissão.
+- Métricas em formato Prometheus/OpenTelemetry — hoje é um JSON simples
+  (`GET /metrics`); em produção trocaria `InMemoryMetrics` por um client
+  real (ex: `prom-client`), mesma interface.

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AlertNotifier } from "../adapters/alerting/AlertNotifier.js";
+import type { AuditTrail } from "../adapters/audit/AuditTrail.js";
+import type { Metrics } from "../adapters/metrics/Metrics.js";
 import type { AppNotifier } from "../adapters/notifier/AppNotifier.js";
 import type { EmailSender } from "../adapters/email/EmailSender.js";
 import type { NFSeClient } from "../adapters/nfse/NFSeClient.js";
@@ -15,9 +17,15 @@ export interface InvoiceEmissionServiceDeps {
   emailSender: EmailSender;
   appNotifier: AppNotifier;
   alertNotifier: AlertNotifier;
+  auditTrail: AuditTrail;
+  metrics: Metrics;
   retryOptions: RetryOptions;
   logger?: Pick<Console, "info" | "warn" | "error">;
 }
+
+type PreparedInvoice =
+  | { done: true; invoice: Invoice }
+  | { done: false; invoice: Invoice; patient: Patient; doctor: Doctor };
 
 /**
  * Orquestra o fluxo TO-BE completo a partir de um evento de pagamento ja
@@ -27,9 +35,9 @@ export interface InvoiceEmissionServiceDeps {
  *   3. Persiste o resultado (sucesso ou falha, para acompanhamento).
  *   4. Envia e-mail ao paciente e notifica o App via webhook.
  *
- * Alem disso cobre pontos nao resolvidos pelo AS-IS/TO-BE original:
- * alertas ativos em falha, recuperacao de notas travadas em "processing"
- * (crash-safety) e cancelamento de nota em caso de estorno do pagamento.
+ * Alem disso cobre lacunas que o AS-IS/TO-BE original nao antecipa: alertas
+ * ativos, recuperacao de notas travadas (crash-safety), cancelamento por
+ * estorno, trilha de auditoria imutavel e metricas basicas de saude.
  *
  * Falhas de e-mail/notificacao NAO revertem a nota ja emitida — sao
  * logadas e alertadas, mas nao bloqueiam o fluxo.
@@ -41,34 +49,32 @@ export class InvoiceEmissionService {
     this.logger = deps.logger ?? console;
   }
 
+  /** Processa o pagamento do inicio ao fim, so retornando quando a nota estiver emitida/falhada. */
   async processPayment(event: PaymentEvent): Promise<Invoice> {
-    const existing = await this.deps.invoiceRepository.findByPaymentExternalId(event.externalId);
-    if (existing) {
-      this.logger.info(`[invoice-service] Evento ${event.externalId} ja processado (idempotencia), retornando invoice existente`);
-      return existing;
-    }
+    const prepared = await this.prepareInvoice(event);
+    if (prepared.done) return prepared.invoice;
+    return this.emitInvoice(prepared.invoice, prepared.patient, prepared.doctor);
+  }
 
-    const patient = await this.deps.patientDoctorRepository.findPatientById(event.patientId);
-    const doctor = patient ? await this.deps.patientDoctorRepository.findLastDoctorForPatient(event.patientId) : null;
+  /**
+   * Variante usada pelos webhooks HTTP: resolve a associacao
+   * paciente/medico e garante a idempotencia de forma rapida (sem esperar a
+   * emissao, que pode levar segundos com retentativas), devolvendo a
+   * invoice ainda em "processing". A emissao continua em background — o
+   * chamador deve consultar `GET /invoices/:id` (ou aguardar a notificacao
+   * do App) para saber o resultado final. Sem isso, o endpoint do webhook
+   * ficaria bloqueado tempo demais e arriscaria o gateway considerar a
+   * entrega expirada e reenviar.
+   */
+  async acceptPaymentAsync(event: PaymentEvent): Promise<Invoice> {
+    const prepared = await this.prepareInvoice(event);
+    if (prepared.done) return prepared.invoice;
 
-    const now = new Date().toISOString();
-    const invoice = await this.deps.invoiceRepository.create({
-      id: randomUUID(),
-      paymentExternalId: event.externalId,
-      patientId: event.patientId,
-      doctorId: doctor?.id ?? null,
-      amountCents: event.amountCents,
-      status: "processing",
-      attempts: 0,
-      createdAt: now,
-      updatedAt: now,
+    void this.emitInvoice(prepared.invoice, prepared.patient, prepared.doctor).catch((error) => {
+      this.logger.error(`[invoice-service] emissao em background falhou inesperadamente: ${String(error)}`);
     });
 
-    if (!patient || !doctor) {
-      return this.failForInconsistentData(invoice, !patient ? "paciente nao encontrado" : "nenhum medico associado ao paciente");
-    }
-
-    return this.emitInvoice(invoice, patient, doctor);
+    return prepared.invoice;
   }
 
   /**
@@ -90,6 +96,13 @@ export class InvoiceEmissionService {
         message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}) estava presa em "processing" e sera reprocessada`,
         context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
       });
+      await this.deps.auditTrail.record({
+        invoiceId: invoice.id,
+        eventType: "recovery_attempt",
+        fromStatus: "processing",
+        toStatus: "processing",
+        message: "Nota travada encontrada pela varredura de recuperacao, reprocessando",
+      });
 
       const patient = await this.deps.patientDoctorRepository.findPatientById(invoice.patientId);
       const doctor = patient ? await this.deps.patientDoctorRepository.findLastDoctorForPatient(invoice.patientId) : null;
@@ -100,6 +113,7 @@ export class InvoiceEmissionService {
       }
 
       await this.emitInvoice(invoice, patient, doctor);
+      this.deps.metrics.increment("invoices.recovered");
     }
 
     return { checked: stuck.length, recovered: stuck.length };
@@ -129,10 +143,19 @@ export class InvoiceEmissionService {
 
     if (invoice.status !== "issued") {
       this.logger.info(`[invoice-service] Estorno para invoice ${invoice.id} com status "${invoice.status}" — marcando cancelada sem chamar a prefeitura`);
-      return this.deps.invoiceRepository.update(invoice.id, {
+      const cancelled = await this.deps.invoiceRepository.update(invoice.id, {
         status: "cancelled",
         cancellationReason: "Pagamento estornado antes da emissao da nota",
       });
+      await this.deps.auditTrail.record({
+        invoiceId: invoice.id,
+        eventType: "cancelled",
+        fromStatus: invoice.status,
+        toStatus: "cancelled",
+        message: "Pagamento estornado antes da nota ser emitida",
+      });
+      this.deps.metrics.increment("invoices.cancelled");
+      return cancelled;
     }
 
     try {
@@ -154,6 +177,14 @@ export class InvoiceEmissionService {
       status: "cancelled",
       cancellationReason: "Pagamento estornado",
     });
+    await this.deps.auditTrail.record({
+      invoiceId: invoice.id,
+      eventType: "cancelled",
+      fromStatus: "issued",
+      toStatus: "cancelled",
+      message: `NFS-e ${invoice.nfseNumber} cancelada apos estorno do pagamento`,
+    });
+    this.deps.metrics.increment("invoices.cancelled");
 
     const patient = await this.deps.patientDoctorRepository.findPatientById(invoice.patientId);
     if (patient && invoice.nfseNumber) {
@@ -171,6 +202,50 @@ export class InvoiceEmissionService {
     return cancelled;
   }
 
+  /**
+   * Resolve idempotencia (via `findOrCreate` atomico, evitando duas
+   * invoices para o mesmo pagamento sob concorrencia) e associacao
+   * paciente+medico. Compartilhado por `processPayment` e
+   * `acceptPaymentAsync` para nao duplicar essa logica.
+   */
+  private async prepareInvoice(event: PaymentEvent): Promise<PreparedInvoice> {
+    const patient = await this.deps.patientDoctorRepository.findPatientById(event.patientId);
+    const doctor = patient ? await this.deps.patientDoctorRepository.findLastDoctorForPatient(event.patientId) : null;
+
+    const now = new Date().toISOString();
+    const { invoice, created } = await this.deps.invoiceRepository.findOrCreate(event.externalId, () => ({
+      id: randomUUID(),
+      paymentExternalId: event.externalId,
+      patientId: event.patientId,
+      doctorId: doctor?.id ?? null,
+      amountCents: event.amountCents,
+      status: "processing",
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    if (!created) {
+      this.logger.info(`[invoice-service] Evento ${event.externalId} ja processado (idempotencia), retornando invoice existente`);
+      return { done: true, invoice };
+    }
+
+    await this.deps.auditTrail.record({
+      invoiceId: invoice.id,
+      eventType: "created",
+      fromStatus: null,
+      toStatus: "processing",
+      message: `Invoice criada a partir do pagamento ${event.externalId}`,
+    });
+
+    if (!patient || !doctor) {
+      const failed = await this.failForInconsistentData(invoice, !patient ? "paciente nao encontrado" : "nenhum medico associado ao paciente");
+      return { done: true, invoice: failed };
+    }
+
+    return { done: false, invoice, patient, doctor };
+  }
+
   private async failForInconsistentData(invoice: Invoice, reason: string): Promise<Invoice> {
     this.logger.error(`[invoice-service] Falha de dados para pagamento ${invoice.paymentExternalId}: ${reason}`);
     await this.deps.alertNotifier.send({
@@ -179,13 +254,23 @@ export class InvoiceEmissionService {
       message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}): ${reason}`,
       context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
     });
-    return this.deps.invoiceRepository.update(invoice.id, {
+    const failed = await this.deps.invoiceRepository.update(invoice.id, {
       status: "failed",
       lastError: `Dados inconsistentes: ${reason}`,
     });
+    await this.deps.auditTrail.record({
+      invoiceId: invoice.id,
+      eventType: "data_inconsistent",
+      fromStatus: "processing",
+      toStatus: "failed",
+      message: reason,
+    });
+    this.deps.metrics.increment("invoices.failed");
+    return failed;
   }
 
   private async emitInvoice(invoice: Invoice, patient: Patient, doctor: Doctor): Promise<Invoice> {
+    const startedAt = Date.now();
     try {
       const { result, attempts } = await withRetry(
         () =>
@@ -205,23 +290,42 @@ export class InvoiceEmissionService {
         pdfUrl: result.pdfUrl,
         attempts,
       });
+      this.deps.metrics.increment("invoices.issued");
+      this.deps.metrics.observeDurationMs("nfse.emit.duration_ms", Date.now() - startedAt);
+      await this.deps.auditTrail.record({
+        invoiceId: invoice.id,
+        eventType: "issued",
+        fromStatus: "processing",
+        toStatus: "issued",
+        message: `NFS-e ${result.nfseNumber} emitida apos ${attempts} tentativa(s)`,
+        context: { attempts },
+      });
 
       await this.notifyDownstream(issued, patient);
       return issued;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`[invoice-service] Emissao falhou apos retentativas para pagamento ${invoice.paymentExternalId}: ${message}`);
+      this.deps.metrics.increment("invoices.failed");
       await this.deps.alertNotifier.send({
         severity: "critical",
         title: "Falha ao emitir NFS-e",
         message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}): ${message}`,
         context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
       });
-      return this.deps.invoiceRepository.update(invoice.id, {
+      const failed = await this.deps.invoiceRepository.update(invoice.id, {
         status: "failed",
         attempts: this.deps.retryOptions.maxAttempts,
         lastError: message,
       });
+      await this.deps.auditTrail.record({
+        invoiceId: invoice.id,
+        eventType: "emission_failed",
+        fromStatus: "processing",
+        toStatus: "failed",
+        message,
+      });
+      return failed;
     }
   }
 
