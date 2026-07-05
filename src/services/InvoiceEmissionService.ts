@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { AlertNotifier } from "../adapters/alerting/AlertNotifier.js";
 import type { AppNotifier } from "../adapters/notifier/AppNotifier.js";
 import type { EmailSender } from "../adapters/email/EmailSender.js";
 import type { NFSeClient } from "../adapters/nfse/NFSeClient.js";
 import { withRetry, type RetryOptions } from "../core/retry.js";
-import type { Invoice, PaymentEvent } from "../domain/models.js";
+import type { Doctor, Invoice, Patient, PaymentEvent, PaymentRefundEvent } from "../domain/models.js";
 import type { InvoiceRepository } from "../repositories/InvoiceRepository.js";
 import type { PatientDoctorRepository } from "../repositories/PatientDoctorRepository.js";
 
@@ -13,6 +14,7 @@ export interface InvoiceEmissionServiceDeps {
   nfseClient: NFSeClient;
   emailSender: EmailSender;
   appNotifier: AppNotifier;
+  alertNotifier: AlertNotifier;
   retryOptions: RetryOptions;
   logger?: Pick<Console, "info" | "warn" | "error">;
 }
@@ -25,8 +27,12 @@ export interface InvoiceEmissionServiceDeps {
  *   3. Persiste o resultado (sucesso ou falha, para acompanhamento).
  *   4. Envia e-mail ao paciente e notifica o App via webhook.
  *
+ * Alem disso cobre pontos nao resolvidos pelo AS-IS/TO-BE original:
+ * alertas ativos em falha, recuperacao de notas travadas em "processing"
+ * (crash-safety) e cancelamento de nota em caso de estorno do pagamento.
+ *
  * Falhas de e-mail/notificacao NAO revertem a nota ja emitida — sao
- * logadas para alerta manual (ponto em aberto "alertas em caso de falha").
+ * logadas e alertadas, mas nao bloqueiam o fluxo.
  */
 export class InvoiceEmissionService {
   private readonly logger: Pick<Console, "info" | "warn" | "error">;
@@ -46,7 +52,7 @@ export class InvoiceEmissionService {
     const doctor = patient ? await this.deps.patientDoctorRepository.findLastDoctorForPatient(event.patientId) : null;
 
     const now = new Date().toISOString();
-    let invoice = await this.deps.invoiceRepository.create({
+    const invoice = await this.deps.invoiceRepository.create({
       id: randomUUID(),
       paymentExternalId: event.externalId,
       patientId: event.patientId,
@@ -59,14 +65,127 @@ export class InvoiceEmissionService {
     });
 
     if (!patient || !doctor) {
-      const reason = !patient ? "paciente nao encontrado" : "nenhum medico associado ao paciente";
-      this.logger.error(`[invoice-service] Falha de dados para pagamento ${event.externalId}: ${reason}`);
+      return this.failForInconsistentData(invoice, !patient ? "paciente nao encontrado" : "nenhum medico associado ao paciente");
+    }
+
+    return this.emitInvoice(invoice, patient, doctor);
+  }
+
+  /**
+   * Varre invoices presas em "processing" (ex: o processo caiu no meio da
+   * emissao) e tenta finaliza-las. Chamado periodicamente e no startup do
+   * servico — sem isso, uma nota travada so seria notada se alguem checasse
+   * manualmente, recriando a dependencia de operacao humana que o TO-BE
+   * queria eliminar.
+   */
+  async recoverStuckInvoices(olderThanMs: number): Promise<{ checked: number; recovered: number }> {
+    const stuck = (await this.deps.invoiceRepository.listByStatus("processing")).filter(
+      (invoice) => Date.now() - new Date(invoice.updatedAt).getTime() >= olderThanMs,
+    );
+
+    for (const invoice of stuck) {
+      await this.deps.alertNotifier.send({
+        severity: "warning",
+        title: "Nota travada em processamento",
+        message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}) estava presa em "processing" e sera reprocessada`,
+        context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
+      });
+
+      const patient = await this.deps.patientDoctorRepository.findPatientById(invoice.patientId);
+      const doctor = patient ? await this.deps.patientDoctorRepository.findLastDoctorForPatient(invoice.patientId) : null;
+
+      if (!patient || !doctor) {
+        await this.failForInconsistentData(invoice, !patient ? "paciente nao encontrado" : "nenhum medico associado ao paciente");
+        continue;
+      }
+
+      await this.emitInvoice(invoice, patient, doctor);
+    }
+
+    return { checked: stuck.length, recovered: stuck.length };
+  }
+
+  /**
+   * Cancela a NFS-e correspondente a um pagamento estornado. Nao esta no
+   * documento original, mas e uma lacuna obvia: sem isso, um reembolso no
+   * gateway deixa uma nota fiscal orfa no sistema.
+   */
+  async processRefund(event: PaymentRefundEvent): Promise<Invoice | null> {
+    const invoice = await this.deps.invoiceRepository.findByPaymentExternalId(event.paymentExternalId);
+
+    if (!invoice) {
+      await this.deps.alertNotifier.send({
+        severity: "warning",
+        title: "Estorno recebido para pagamento desconhecido",
+        message: `Nenhuma invoice encontrada para o pagamento ${event.paymentExternalId}`,
+        context: { paymentExternalId: event.paymentExternalId },
+      });
+      return null;
+    }
+
+    if (invoice.status === "cancelled") {
+      return invoice;
+    }
+
+    if (invoice.status !== "issued") {
+      this.logger.info(`[invoice-service] Estorno para invoice ${invoice.id} com status "${invoice.status}" — marcando cancelada sem chamar a prefeitura`);
       return this.deps.invoiceRepository.update(invoice.id, {
-        status: "failed",
-        lastError: `Dados inconsistentes: ${reason}`,
+        status: "cancelled",
+        cancellationReason: "Pagamento estornado antes da emissao da nota",
       });
     }
 
+    try {
+      if (invoice.nfseNumber) {
+        await withRetry(() => this.deps.nfseClient.cancel(invoice.nfseNumber!), this.deps.retryOptions);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.deps.alertNotifier.send({
+        severity: "critical",
+        title: "Falha ao cancelar NFS-e apos estorno",
+        message: `Invoice ${invoice.id} (NFS-e ${invoice.nfseNumber}): ${message}`,
+        context: { invoiceId: invoice.id, nfseNumber: invoice.nfseNumber },
+      });
+      throw error;
+    }
+
+    const cancelled = await this.deps.invoiceRepository.update(invoice.id, {
+      status: "cancelled",
+      cancellationReason: "Pagamento estornado",
+    });
+
+    const patient = await this.deps.patientDoctorRepository.findPatientById(invoice.patientId);
+    if (patient && invoice.nfseNumber) {
+      try {
+        await this.deps.emailSender.sendCancellationEmail({
+          patient,
+          nfseNumber: invoice.nfseNumber,
+          reason: "Pagamento estornado",
+        });
+      } catch (error) {
+        this.logger.warn(`[invoice-service] Falha ao enviar e-mail de cancelamento da invoice ${invoice.id}: ${String(error)}`);
+      }
+    }
+
+    return cancelled;
+  }
+
+  private async failForInconsistentData(invoice: Invoice, reason: string): Promise<Invoice> {
+    this.logger.error(`[invoice-service] Falha de dados para pagamento ${invoice.paymentExternalId}: ${reason}`);
+    await this.deps.alertNotifier.send({
+      severity: "critical",
+      title: "Dados inconsistentes ao processar pagamento",
+      message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}): ${reason}`,
+      context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
+    });
+    return this.deps.invoiceRepository.update(invoice.id, {
+      status: "failed",
+      lastError: `Dados inconsistentes: ${reason}`,
+    });
+  }
+
+  private async emitInvoice(invoice: Invoice, patient: Patient, doctor: Doctor): Promise<Invoice> {
     try {
       const { result, attempts } = await withRetry(
         () =>
@@ -74,36 +193,39 @@ export class InvoiceEmissionService {
             patientName: patient.name,
             patientCpf: patient.cpf,
             doctorName: doctor.name,
-            amountCents: event.amountCents,
+            amountCents: invoice.amountCents,
             description: `Atendimento medico - ${doctor.name}`,
           }),
         this.deps.retryOptions,
       );
 
-      invoice = await this.deps.invoiceRepository.update(invoice.id, {
+      const issued = await this.deps.invoiceRepository.update(invoice.id, {
         status: "issued",
         nfseNumber: result.nfseNumber,
         pdfUrl: result.pdfUrl,
         attempts,
       });
+
+      await this.notifyDownstream(issued, patient);
+      return issued;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[invoice-service] Emissao falhou apos retentativas para pagamento ${event.externalId}: ${message}`);
+      this.logger.error(`[invoice-service] Emissao falhou apos retentativas para pagamento ${invoice.paymentExternalId}: ${message}`);
+      await this.deps.alertNotifier.send({
+        severity: "critical",
+        title: "Falha ao emitir NFS-e",
+        message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}): ${message}`,
+        context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
+      });
       return this.deps.invoiceRepository.update(invoice.id, {
         status: "failed",
         attempts: this.deps.retryOptions.maxAttempts,
         lastError: message,
       });
     }
-
-    await this.notifyDownstream(invoice, patient);
-    return invoice;
   }
 
-  private async notifyDownstream(
-    invoice: Invoice,
-    patient: { id: string; name: string; email: string; cpf: string },
-  ): Promise<void> {
+  private async notifyDownstream(invoice: Invoice, patient: Patient): Promise<void> {
     if (!invoice.nfseNumber || !invoice.pdfUrl) return;
 
     try {

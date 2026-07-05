@@ -26,7 +26,7 @@ export interface PaymentEvent {
   occurredAt: string;
 }
 
-export type InvoiceStatus = "pending" | "processing" | "issued" | "failed";
+export type InvoiceStatus = "pending" | "processing" | "issued" | "failed" | "cancelled";
 
 export interface Invoice {
   id: string;
@@ -40,6 +40,14 @@ export interface Invoice {
   pdfUrl?: string;
   attempts: number;
   lastError?: string;
+  /** Preenchido quando status === "cancelled" (ex: pagamento estornado). */
+  cancellationReason?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Estorno/reembolso de um pagamento ja processado (ex: Stripe "charge.refunded"). */
+export interface PaymentRefundEvent {
+  paymentExternalId: string;
+  occurredAt: string;
 }

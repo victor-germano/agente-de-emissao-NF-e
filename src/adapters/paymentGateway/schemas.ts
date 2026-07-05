@@ -1,10 +1,10 @@
 import { z } from "zod";
 
 /**
- * Formato simplificado de um evento "charge/payment succeeded" do Stripe.
+ * Formato simplificado de um evento "payment succeeded" do Stripe.
  * Reduzido aos campos que o agente realmente precisa.
  */
-export const StripeEventSchema = z.object({
+export const StripePaymentSucceededSchema = z.object({
   id: z.string(),
   type: z.literal("payment_intent.succeeded"),
   data: z.object({
@@ -19,6 +19,29 @@ export const StripeEventSchema = z.object({
     }),
   }),
 });
+
+export type StripePaymentSucceededEvent = z.infer<typeof StripePaymentSucceededSchema>;
+
+/**
+ * Evento de estorno/reembolso do Stripe. `payment_intent` referencia o
+ * pagamento original — usado para localizar a invoice ja emitida e
+ * cancela-la (item "cancelamento/estorno" nao coberto pelo documento
+ * original, mas necessario para uma automacao completa).
+ */
+export const StripeChargeRefundedSchema = z.object({
+  id: z.string(),
+  type: z.literal("charge.refunded"),
+  data: z.object({
+    object: z.object({
+      payment_intent: z.string(),
+      created: z.number().int().optional(),
+    }),
+  }),
+});
+
+export type StripeChargeRefundedEvent = z.infer<typeof StripeChargeRefundedSchema>;
+
+export const StripeEventSchema = z.discriminatedUnion("type", [StripePaymentSucceededSchema, StripeChargeRefundedSchema]);
 
 export type StripeEvent = z.infer<typeof StripeEventSchema>;
 

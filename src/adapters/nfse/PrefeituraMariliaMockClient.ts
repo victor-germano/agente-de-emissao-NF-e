@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { NFSeClient, NFSeEmissionRequest, NFSeEmissionResult } from "./NFSeClient.js";
-import { NFSeEmissionError } from "./NFSeClient.js";
+import { NFSeCancellationError, NFSeEmissionError } from "./NFSeClient.js";
 
 export interface PrefeituraMariliaMockClientOptions {
   /** Fracao entre 0 e 1 simulando indisponibilidade do site da prefeitura. */
@@ -51,6 +51,16 @@ export class PrefeituraMariliaMockClient implements NFSeClient {
       nfseNumber,
       pdfUrl: `https://mock-prefeitura-marilia.example/nfse/${nfseNumber}.pdf`,
     };
+  }
+
+  async cancel(nfseNumber: string): Promise<void> {
+    await delay(this.latencyMs);
+
+    if (Math.random() < this.failureRate) {
+      throw new NFSeCancellationError(
+        `Falha simulada ao cancelar NFS-e ${nfseNumber} (site da prefeitura indisponivel ou rejeitou o cancelamento)`,
+      );
+    }
   }
 }
 

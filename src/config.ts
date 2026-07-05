@@ -17,4 +17,15 @@ export const config = {
     maxAttempts: num(process.env.NFSE_RETRY_MAX_ATTEMPTS, 3),
     baseDelayMs: num(process.env.NFSE_RETRY_BASE_DELAY_MS, 200),
   },
+  security: {
+    stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || undefined,
+    gateway2WebhookSecret: process.env.GATEWAY2_WEBHOOK_SECRET || undefined,
+  },
+  recovery: {
+    stuckInvoiceThresholdMs: num(process.env.STUCK_INVOICE_THRESHOLD_MS, 60_000),
+    sweepIntervalMs: num(process.env.RECOVERY_SWEEP_INTERVAL_MS, 60_000),
+  },
+  reconciliation: {
+    intervalMs: num(process.env.RECONCILIATION_INTERVAL_MS, 120_000),
+  },
 };

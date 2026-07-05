@@ -77,6 +77,38 @@ POST /webhooks/stripe            POST /webhooks/gateway2 (Pix/parcelado)
   quando esse gateway existir de fato, é só apontar o webhook dele para essa
   rota.
 
+## Além do documento: fechando lacunas de uma automação completa
+
+O documento original cobre o caminho feliz e lista pontos em aberto, mas
+"financeiro sai completamente da operação manual" só é verdade se falhas
+forem visíveis e o sistema se recuperar sozinho de problemas comuns. Cinco
+adições cobrem isso:
+
+1. **Alertas ativos em falha** (`AlertNotifier`, `src/adapters/alerting`) —
+   toda falha de emissão, dado inconsistente, estorno de pagamento
+   desconhecido ou achado da reconciliação dispara um alerta, hoje guardado
+   em memória e exposto via `GET /alerts` (consumido pelo painel visual). Em
+   produção, troca-se `InMemoryAlertNotifier` por uma implementação que
+   posta num webhook do Slack/PagerDuty — mesma interface.
+2. **Recuperação de notas travadas** (`InvoiceEmissionService.recoverStuckInvoices`)
+   — varre invoices presas em `"processing"` (ex: o processo caiu no meio da
+   emissão) e tenta finalizá-las. Roda a cada `RECOVERY_SWEEP_INTERVAL_MS` e
+   também sob demanda via `POST /debug/recover-stuck`.
+3. **Verificação de assinatura do webhook Stripe** (`src/adapters/paymentGateway/stripeSignature.ts`)
+   — reimplementa o esquema real do Stripe (`t=<timestamp>,v1=<hmac>`), não
+   um placeholder. Ativa automaticamente quando `STRIPE_WEBHOOK_SECRET` é
+   configurada; sem ela, a checagem é pulada (conveniente para o painel
+   local). O segundo gateway tem uma checagem equivalente mais simples via
+   header `x-gateway2-secret` + `GATEWAY2_WEBHOOK_SECRET`.
+4. **Reconciliação Stripe × notas emitidas** (`ReconciliationService`) — roda
+   periodicamente (`RECONCILIATION_INTERVAL_MS`) comparando os pagamentos
+   aprovados no gateway com as invoices existentes, para pegar casos em que
+   o webhook nunca chegou. Também disparável via `POST /reconciliation/run`.
+5. **Cancelamento por estorno** — um evento `charge.refunded` do Stripe
+   localiza a invoice pelo `payment_intent` original, cancela a NFS-e já
+   emitida (`NFSeClient.cancel`) e avisa o paciente por e-mail. Sem isso, um
+   reembolso deixaria uma nota fiscal órfã no sistema.
+
 ## Rodando localmente
 
 ```bash
@@ -88,11 +120,13 @@ npm run dev        # http://localhost:3000
 ### Painel visual
 
 Abrindo `http://localhost:3000` no navegador (servido pelo próprio Express a
-partir de `public/index.html`, sem build/framework) você tem um formulário
-para simular pagamentos (Stripe ou segundo gateway), um controle para forçar
-a taxa de falha do mock da Prefeitura (para observar o retry/backoff e o
-status `failed` visualmente) e uma tabela das notas processadas, atualizada
-a cada 2s. Os dados são in-memory: reiniciar o servidor limpa a tabela.
+partir de `public/index.html`, sem build/framework) você tem: formulário
+para simular pagamentos (Stripe ou segundo gateway); controle para forçar a
+taxa de falha do mock da Prefeitura; simulação de nota travada + botão de
+recuperação; simulação de pagamento perdido + botão de reconciliação;
+simulação de estorno sobre uma nota já emitida; feed de alertas recentes; e
+a tabela de notas processadas — tudo atualizado a cada 2s. Os dados são
+in-memory: reiniciar o servidor limpa tudo.
 
 Simular um pagamento Stripe via curl (alternativa ao painel):
 
@@ -121,7 +155,12 @@ curl -X POST http://localhost:3000/webhooks/gateway2 \
   }'
 ```
 
-Consultar: `GET /invoices`, `GET /invoices/:id`, `GET /invoices/failed`.
+Consultar: `GET /invoices`, `GET /invoices/:id`, `GET /invoices/failed`,
+`GET /alerts`.
+
+Outros endpoints de debug/operação: `POST /debug/simulate-stuck-invoice`,
+`POST /debug/recover-stuck`, `POST /debug/simulate-missed-payment`,
+`POST /reconciliation/run`.
 
 Para testar o cenário de falha/retry, ajuste `NFSE_MOCK_FAILURE_RATE` no
 `.env` (ex: `0.5`) e observe os `attempts` na resposta.
@@ -139,7 +178,10 @@ npm test
 
 Cobrem: retry/backoff, associação automática médico+paciente, idempotência,
 emissão com falha transitória seguida de sucesso, falha após esgotar
-tentativas, dados inconsistentes, e os dois webhooks HTTP fim a fim.
+tentativas, dados inconsistentes, os dois webhooks HTTP fim a fim,
+recuperação de notas travadas, estorno/cancelamento, reconciliação e
+verificação de assinatura do Stripe (assinatura válida, adulterada, segredo
+errado, timestamp expirado).
 
 ## Como plugar as integrações reais
 
@@ -148,8 +190,9 @@ tentativas, dados inconsistentes, e os dois webhooks HTTP fim a fim.
   `consultations`, `invoices`), reaproveitando as variáveis já previstas em
   `.env.example` (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`), e trocar a
   instância em `src/index.ts`.
-- **Stripe real**: trocar o parser mock por verificação de assinatura do
-  webhook (`stripe.webhooks.constructEvent`) antes de normalizar o evento.
+- **Stripe real**: a verificação de assinatura já está implementada
+  (`verifyStripeSignature`) — basta configurar `STRIPE_WEBHOOK_SECRET` com o
+  segredo real do endpoint.
 - **Prefeitura de Marília real**: nova implementação de `NFSeClient` — API
   oficial (se existir) ou automação via Playwright contra o portal web,
   mantendo a mesma assinatura `emit(request): Promise<NFSeEmissionResult>`.
@@ -162,5 +205,12 @@ tentativas, dados inconsistentes, e os dois webhooks HTTP fim a fim.
   existe; falta a integração real, item citado no documento como "próximo
   passo futuro").
 - Persistência real (Postgres/Supabase) — hoje in-memory, reiniciar o
-  processo limpa os dados.
-- Autenticação/autorização dos endpoints HTTP.
+  processo limpa os dados (inclusive os "presos em processing" simulados
+  para o debug).
+- Autenticação/autorização dos endpoints de consulta e debug (`/invoices`,
+  `/alerts`, `/debug/*`) — só os webhooks de pagamento têm verificação de
+  origem (assinatura Stripe / segredo compartilhado).
+- Reconciliação real com a API do Stripe — `ReconciliationGateway` é mockado
+  (lista o que foi injetado via `/debug/simulate-missed-payment`); em
+  produção, implementaria `listRecentSuccessfulPayments` consultando
+  `stripe.charges.list` ou similar.
