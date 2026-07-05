@@ -1,3 +1,4 @@
+import path from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { normalizeSecondGatewayEvent, normalizeStripeEvent } from "../adapters/paymentGateway/normalize.js";
@@ -5,18 +6,42 @@ import { SecondGatewayEventSchema, StripeEventSchema } from "../adapters/payment
 import type { InvoiceEmissionService } from "../services/InvoiceEmissionService.js";
 import type { InvoiceRepository } from "../repositories/InvoiceRepository.js";
 
+export interface NFSeMockControl {
+  getFailureRate(): number;
+  setFailureRate(rate: number): void;
+}
+
 export interface CreateAppDeps {
   invoiceEmissionService: InvoiceEmissionService;
   invoiceRepository: InvoiceRepository;
+  /** Se presente, habilita o painel/endpoints de debug do mock da prefeitura (uso local/demo). */
+  nfseMockControl?: NFSeMockControl;
 }
+
+const FailureRateSchema = z.object({ rate: z.number().min(0).max(1) });
 
 export function createApp(deps: CreateAppDeps): Express {
   const app = express();
   app.use(express.json());
+  app.use(express.static(path.join(process.cwd(), "public")));
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
   });
+
+  if (deps.nfseMockControl) {
+    const control = deps.nfseMockControl;
+
+    app.get("/debug/nfse-failure-rate", (_req, res) => {
+      res.json({ rate: control.getFailureRate() });
+    });
+
+    app.post("/debug/nfse-failure-rate", asyncHandler(async (req, res) => {
+      const { rate } = FailureRateSchema.parse(req.body);
+      control.setFailureRate(rate);
+      res.json({ rate });
+    }));
+  }
 
   // Etapas 1-2 do TO-BE: transacao no Stripe chega via webhook.
   app.post("/webhooks/stripe", asyncHandler(async (req, res) => {

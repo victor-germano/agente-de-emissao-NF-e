@@ -10,19 +10,21 @@ import { InvoiceEmissionService } from "./services/InvoiceEmissionService.js";
 const invoiceRepository = new InMemoryInvoiceRepository();
 const patientDoctorRepository = new InMemoryPatientDoctorRepository();
 
+const nfseClient = new PrefeituraMariliaMockClient({
+  failureRate: config.nfse.mockFailureRate,
+  latencyMs: config.nfse.mockLatencyMs,
+});
+
 const invoiceEmissionService = new InvoiceEmissionService({
   invoiceRepository,
   patientDoctorRepository,
-  nfseClient: new PrefeituraMariliaMockClient({
-    failureRate: config.nfse.mockFailureRate,
-    latencyMs: config.nfse.mockLatencyMs,
-  }),
+  nfseClient,
   emailSender: new ConsoleEmailSender(),
   appNotifier: new HttpAppNotifier(config.appNotificationWebhookUrl),
   retryOptions: config.retry,
 });
 
-const app = createApp({ invoiceEmissionService, invoiceRepository });
+const app = createApp({ invoiceEmissionService, invoiceRepository, nfseMockControl: nfseClient });
 
 app.listen(config.port, () => {
   console.log(`VYX NF agent ouvindo na porta ${config.port}`);

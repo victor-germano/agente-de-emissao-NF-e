@@ -20,12 +20,27 @@ export interface PrefeituraMariliaMockClientOptions {
  * sistema muda.
  */
 export class PrefeituraMariliaMockClient implements NFSeClient {
-  constructor(private readonly options: PrefeituraMariliaMockClientOptions) {}
+  private failureRate: number;
+  private readonly latencyMs: number;
+
+  constructor(options: PrefeituraMariliaMockClientOptions) {
+    this.failureRate = options.failureRate;
+    this.latencyMs = options.latencyMs;
+  }
+
+  /** Permite ajustar a taxa de falha em runtime (usado pelo painel de debug/demo). */
+  setFailureRate(rate: number): void {
+    this.failureRate = rate;
+  }
+
+  getFailureRate(): number {
+    return this.failureRate;
+  }
 
   async emit(request: NFSeEmissionRequest): Promise<NFSeEmissionResult> {
-    await delay(this.options.latencyMs);
+    await delay(this.latencyMs);
 
-    if (Math.random() < this.options.failureRate) {
+    if (Math.random() < this.failureRate) {
       throw new NFSeEmissionError(
         `Falha simulada ao emitir NFS-e para ${request.patientName} (site da prefeitura indisponivel ou rejeitou os dados)`,
       );

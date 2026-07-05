@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VYX — Simulador de Emissão de NFS-e</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --border: #e2e5ea;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --ok-bg: #dcfce7;
+    --warn: #b45309;
+    --warn-bg: #fef3c7;
+    --err: #b91c1c;
+    --err-bg: #fee2e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d;
+      --panel: #1f2229;
+      --text: #e6e8eb;
+      --muted: #9aa1ab;
+      --border: #2c303a;
+      --accent: #60a5fa;
+      --ok: #4ade80;
+      --ok-bg: #14301f;
+      --warn: #fbbf24;
+      --warn-bg: #3a2a08;
+      --err: #f87171;
+      --err-bg: #3a1414;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+  }
+  main { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin: 0 0 8px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); min-width: 160px; }
+  select, input, button {
+    font: inherit;
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+  }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    padding: 8px 16px;
+    font-weight: 600;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  #result { margin-top: 12px; font-size: 13px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.issued { background: var(--ok-bg); color: var(--ok); }
+  .badge.processing, .badge.pending { background: var(--warn-bg); color: var(--warn); }
+  .badge.failed { background: var(--err-bg); color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .table-wrap { overflow-x: auto; }
+  .error-cell { color: var(--err); white-space: normal; max-width: 260px; }
+  .top-row { display: flex; justify-content: space-between; align-items: center; }
+  .empty { color: var(--muted); padding: 12px 0; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>VYX — Simulador de Emissão de NFS-e</h1>
+    <p class="subtitle">Dispara eventos de pagamento simulados contra este servidor local e mostra o resultado do fluxo TO-BE (associação médico/paciente → emissão → e-mail → notificação).</p>
+  </div>
+
+  <section class="panel">
+    <h2>Simular pagamento</h2>
+    <form id="payment-form" class="row">
+      <label>Gateway
+        <select id="gateway">
+          <option value="stripe">Stripe</option>
+          <option value="gateway2">Segundo gateway (Pix / parcelado)</option>
+        </select>
+      </label>
+      <label>Paciente
+        <select id="patient">
+          <option value="pat_1">pat_1 — Ana Souza (Dr. Carlos Lima)</option>
+          <option value="pat_2">pat_2 — Bruno Alves (Dra. Fernanda Rocha)</option>
+          <option value="pat_999">pat_999 — desconhecido (simula dado inconsistente)</option>
+          <option value="__custom__">Outro ID...</option>
+        </select>
+      </label>
+      <label id="custom-patient-label" style="display:none">ID do paciente
+        <input id="custom-patient" type="text" placeholder="pat_x" />
+      </label>
+      <label id="method-label" style="display:none">Método
+        <select id="method">
+          <option value="pix">Pix</option>
+          <option value="cartao_parcelado">Cartão parcelado</option>
+        </select>
+      </label>
+      <label>Valor (R$)
+        <input id="amount" type="number" min="1" step="0.01" value="200.00" />
+      </label>
+      <button type="submit">Simular pagamento</button>
+    </form>
+    <div id="result"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Simular indisponibilidade da Prefeitura</h2>
+    <div class="row">
+      <label>Taxa de falha simulada (%)
+        <input id="failure-rate" type="number" min="0" max="100" step="5" value="0" />
+      </label>
+      <button id="apply-failure-rate" type="button" class="secondary">Aplicar</button>
+      <span id="failure-rate-status" class="hint"></span>
+    </div>
+    <p class="hint">Sobe a chance do mock da prefeitura falhar, para observar o retry com backoff exponencial e o status "failed" após esgotar as tentativas.</p>
+  </section>
+
+  <section class="panel">
+    <div class="top-row">
+      <h2>Notas processadas</h2>
+      <button id="refresh" type="button" class="secondary">Atualizar agora</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Criado em</th>
+            <th>Paciente</th>
+            <th>Médico</th>
+            <th>Valor</th>
+            <th>Status</th>
+            <th>Tentativas</th>
+            <th>Nº NFS-e</th>
+            <th>Erro</th>
+          </tr>
+        </thead>
+        <tbody id="invoices-body"></tbody>
+      </table>
+      <div id="empty-state" class="empty" style="display:none">Nenhuma nota processada ainda — simule um pagamento acima.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+  const PATIENTS = {
+    pat_1: "Ana Souza",
+    pat_2: "Bruno Alves",
+    pat_999: "Desconhecido",
+  };
+  const DOCTORS = {
+    doc_1: "Dr. Carlos Lima",
+    doc_2: "Dra. Fernanda Rocha",
+  };
+
+  const gatewaySelect = document.getElementById("gateway");
+  const patientSelect = document.getElementById("patient");
+  const customPatientLabel = document.getElementById("custom-patient-label");
+  const customPatientInput = document.getElementById("custom-patient");
+  const methodLabel = document.getElementById("method-label");
+  const methodSelect = document.getElementById("method");
+  const resultBox = document.getElementById("result");
+
+  gatewaySelect.addEventListener("change", () => {
+    methodLabel.style.display = gatewaySelect.value === "gateway2" ? "flex" : "none";
+  });
+  patientSelect.addEventListener("change", () => {
+    customPatientLabel.style.display = patientSelect.value === "__custom__" ? "flex" : "none";
+  });
+
+  function currentPatientId() {
+    return patientSelect.value === "__custom__" ? (customPatientInput.value.trim() || "pat_desconhecido") : patientSelect.value;
+  }
+
+  function uid(prefix) {
+    const rand = (crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random()).slice(0, 8);
+    return prefix + "_" + rand;
+  }
+
+  document.getElementById("payment-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const amountCents = Math.round(parseFloat(document.getElementById("amount").value || "0") * 100);
+    const patientId = currentPatientId();
+
+    let url, payload;
+    if (gatewaySelect.value === "stripe") {
+      url = "/webhooks/stripe";
+      payload = {
+        id: uid("evt"),
+        type: "payment_intent.succeeded",
+        data: { object: { id: uid("pi"), amount: amountCents, currency: "brl", metadata: { patient_id: patientId } } },
+      };
+    } else {
+      url = "/webhooks/gateway2";
+      payload = {
+        transactionId: uid("tx"),
+        method: methodSelect.value,
+        patientId,
+        amountCents,
+        paidAt: new Date().toISOString(),
+      };
+    }
+
+    resultBox.textContent = "Enviando...";
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        resultBox.innerHTML = '<span class="badge failed">erro</span> ' + (body.error || "falha ao processar");
+      } else {
+        const badge = '<span class="badge ' + body.status + '">' + body.status + "</span>";
+        resultBox.innerHTML = badge + " invoice " + body.id + (body.nfseNumber ? " — NFS-e " + body.nfseNumber : "") + (body.lastError ? " — " + body.lastError : "");
+      }
+    } catch (err) {
+      resultBox.innerHTML = '<span class="badge failed">erro</span> ' + err.message;
+    }
+    loadInvoices();
+  });
+
+  document.getElementById("apply-failure-rate").addEventListener("click", async () => {
+    const pct = Math.max(0, Math.min(100, Number(document.getElementById("failure-rate").value) || 0));
+    const res = await fetch("/debug/nfse-failure-rate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rate: pct / 100 }),
+    });
+    const body = await res.json();
+    document.getElementById("failure-rate-status").textContent = "Taxa atual: " + Math.round(body.rate * 100) + "%";
+  });
+
+  async function loadFailureRate() {
+    try {
+      const res = await fetch("/debug/nfse-failure-rate");
+      if (!res.ok) return;
+      const body = await res.json();
+      document.getElementById("failure-rate").value = Math.round(body.rate * 100);
+      document.getElementById("failure-rate-status").textContent = "Taxa atual: " + Math.round(body.rate * 100) + "%";
+    } catch {}
+  }
+
+  function formatMoney(cents) {
+    return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  }
+
+  function formatTime(iso) {
+    return new Date(iso).toLocaleTimeString("pt-BR");
+  }
+
+  async function loadInvoices() {
+    const res = await fetch("/invoices");
+    const invoices = await res.json();
+    const tbody = document.getElementById("invoices-body");
+    const emptyState = document.getElementById("empty-state");
+
+    if (invoices.length === 0) {
+      tbody.innerHTML = "";
+      emptyState.style.display = "block";
+      return;
+    }
+    emptyState.style.display = "none";
+
+    tbody.innerHTML = invoices
+      .slice()
+      .reverse()
+      .map((inv) => {
+        const patient = PATIENTS[inv.patientId] || inv.patientId;
+        const doctor = inv.doctorId ? DOCTORS[inv.doctorId] || inv.doctorId : "—";
+        return (
+          "<tr>" +
+          "<td>" + formatTime(inv.createdAt) + "</td>" +
+          "<td>" + patient + "</td>" +
+          "<td>" + doctor + "</td>" +
+          "<td>" + formatMoney(inv.amountCents) + "</td>" +
+          '<td><span class="badge ' + inv.status + '">' + inv.status + "</span></td>" +
+          "<td>" + inv.attempts + "</td>" +
+          "<td>" + (inv.nfseNumber || "—") + "</td>" +
+          '<td class="error-cell">' + (inv.lastError || "") + "</td>" +
+          "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  document.getElementById("refresh").addEventListener("click", loadInvoices);
+
+  loadFailureRate();
+  loadInvoices();
+  setInterval(loadInvoices, 2000);
+</script>
+</body>
+</html>

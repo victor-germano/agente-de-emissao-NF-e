@@ -85,7 +85,16 @@ cp .env.example .env
 npm run dev        # http://localhost:3000
 ```
 
-Simular um pagamento Stripe:
+### Painel visual
+
+Abrindo `http://localhost:3000` no navegador (servido pelo próprio Express a
+partir de `public/index.html`, sem build/framework) você tem um formulário
+para simular pagamentos (Stripe ou segundo gateway), um controle para forçar
+a taxa de falha do mock da Prefeitura (para observar o retry/backoff e o
+status `failed` visualmente) e uma tabela das notas processadas, atualizada
+a cada 2s. Os dados são in-memory: reiniciar o servidor limpa a tabela.
+
+Simular um pagamento Stripe via curl (alternativa ao painel):
 
 ```bash
 curl -X POST http://localhost:3000/webhooks/stripe \
