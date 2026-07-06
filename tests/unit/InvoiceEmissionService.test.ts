@@ -177,6 +177,36 @@ describe("InvoiceEmissionService", () => {
     });
   });
 
+  describe("waitForIdle", () => {
+    it("resolve sem pendencias quando a emissao em background termina antes do timeout", async () => {
+      const emit = vi.fn().mockImplementation(() => delay(10).then(() => successResult));
+      const { service } = makeService({ emit, cancel: vi.fn() });
+
+      await service.acceptPaymentAsync(makeEvent());
+      const { pendingAtTimeout } = await service.waitForIdle(200);
+
+      expect(pendingAtTimeout).toBe(0);
+    });
+
+    it("reporta pendencia quando o timeout expira antes da emissao terminar", async () => {
+      const emit = vi.fn().mockImplementation(() => delay(200).then(() => successResult));
+      const { service } = makeService({ emit, cancel: vi.fn() });
+
+      await service.acceptPaymentAsync(makeEvent());
+      const { pendingAtTimeout } = await service.waitForIdle(20);
+
+      expect(pendingAtTimeout).toBe(1);
+    });
+
+    it("resolve imediatamente quando nao ha nenhuma emissao em background", async () => {
+      const nfseClient: NFSeClient = { emit: vi.fn(), cancel: vi.fn() };
+      const { service } = makeService(nfseClient);
+
+      const { pendingAtTimeout } = await service.waitForIdle(200);
+      expect(pendingAtTimeout).toBe(0);
+    });
+  });
+
   describe("recoverStuckInvoices", () => {
     it("reprocessa invoices presas em processing e as emite", async () => {
       const nfseClient: NFSeClient = { emit: vi.fn().mockResolvedValue(successResult), cancel: vi.fn() };

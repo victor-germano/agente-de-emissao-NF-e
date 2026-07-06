@@ -44,9 +44,26 @@ type PreparedInvoice =
  */
 export class InvoiceEmissionService {
   private readonly logger: Pick<Console, "info" | "warn" | "error">;
+  private readonly inFlightBackgroundEmissions = new Set<Promise<unknown>>();
 
   constructor(private readonly deps: InvoiceEmissionServiceDeps) {
     this.logger = deps.logger ?? console;
+  }
+
+  /**
+   * Usado no graceful shutdown: espera as emissoes disparadas por
+   * `acceptPaymentAsync` que ainda estao em voo terminarem (ou o timeout
+   * esgotar), para nao cortar uma emissao no meio quando o processo recebe
+   * SIGTERM. Retorna quantas ainda estavam pendentes ao expirar o timeout.
+   */
+  async waitForIdle(timeoutMs: number): Promise<{ pendingAtTimeout: number }> {
+    const pending = [...this.inFlightBackgroundEmissions];
+    if (pending.length === 0) return { pendingAtTimeout: 0 };
+
+    const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), timeoutMs));
+    const result = await Promise.race([Promise.allSettled(pending).then(() => "done" as const), timeout]);
+
+    return { pendingAtTimeout: result === "timeout" ? this.inFlightBackgroundEmissions.size : 0 };
   }
 
   /** Processa o pagamento do inicio ao fim, so retornando quando a nota estiver emitida/falhada. */
@@ -70,9 +87,11 @@ export class InvoiceEmissionService {
     const prepared = await this.prepareInvoice(event);
     if (prepared.done) return prepared.invoice;
 
-    void this.emitInvoice(prepared.invoice, prepared.patient, prepared.doctor).catch((error) => {
+    const background = this.emitInvoice(prepared.invoice, prepared.patient, prepared.doctor).catch((error) => {
       this.logger.error(`[invoice-service] emissao em background falhou inesperadamente: ${String(error)}`);
     });
+    this.inFlightBackgroundEmissions.add(background);
+    void background.finally(() => this.inFlightBackgroundEmissions.delete(background));
 
     return prepared.invoice;
   }

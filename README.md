@@ -67,27 +67,43 @@ POST /webhooks/stripe            POST /webhooks/gateway2 (Pix/parcelado)
 | 7. Notificação webhook "nota disponível" | `AppNotifier` (`HttpAppNotifier`, faz POST se `APP_NOTIFICATION_WEBHOOK_URL` estiver configurada) |
 | 8. Financeiro sai da operação manual | Não há nenhum passo manual no fluxo feliz; falhas ficam visíveis em `GET /invoices/failed` para intervenção pontual |
 
-## Pontos em aberto do documento — como foram tratados
+## Pontos em aberto do documento (seção 3) — avaliação ponto a ponto
 
-- **API oficial vs RPA/headless para a Prefeitura de Marília**: isolado atrás
-  de `NFSeClient`. Não decidido no código porque depende de descoberta real
-  (a Prefeitura de Marília usa uma plataforma de terceiros para NFS-e —
-  precisa confirmar se expõe webservice/API antes de escolher).
-- **Fallback/erro na emissão**: `withRetry` (`src/core/retry.ts`) faz até
-  `NFSE_RETRY_MAX_ATTEMPTS` tentativas com backoff exponencial. Se todas
-  falharem, a invoice fica com `status: "failed"` e `lastError`, visível em
-  `GET /invoices/failed` — pronto para virar um alerta (Slack/e-mail) real.
-- **Dados inconsistentes** (paciente sem médico associado, paciente
-  inexistente): a invoice é criada com `status: "failed"` e motivo
-  registrado, em vez de lançar exceção silenciosa.
-- **Idempotência**: cada `PaymentEvent.externalId` só gera uma invoice —
-  reprocessar o mesmo webhook (comum em retries de gateways de pagamento)
-  não duplica a nota, mesmo sob concorrência real (`InvoiceRepository.findOrCreate`,
-  ver seção abaixo).
-- **Segundo gateway (Pix/parcelado)**: modelado como um endpoint e schema
-  próprios (`POST /webhooks/gateway2`), já usando o mesmo pipeline —
-  quando esse gateway existir de fato, é só apontar o webhook dele para essa
-  rota.
+O documento lista 5 perguntas explícitas para o dev definir/testar. Status de cada uma:
+
+1. **"Arquitetura exata da integração Stripe → n8n → Supabase → App"** —
+   ✅ decidida e implementada, mas com uma escolha deliberada: o app recebe
+   os webhooks **diretamente** (`POST /webhooks/stripe`/`gateway2`), sem
+   passar pelo n8n. O n8n é ótimo para orquestração visual/low-code, mas
+   para lógica com idempotência atômica, retry com estado e transações teria
+   virado um gargalo de testabilidade — por isso a lógica foi trazida para
+   código versionado e testado, com Supabase como a peça de persistência
+   real do desenho original. Isso é uma decisão de arquitetura para
+   discutir na entrevista, não um espaço em branco.
+2. **"Forma de integração com o site da Prefeitura de Marília: API oficial
+   ou RPA/navegador headless?"** — ❌ genuinamente não respondida, e não dá
+   para responder sem acesso real ao sistema da prefeitura. Isolado atrás de
+   `NFSeClient` — qualquer uma das duas abordagens entra sem mudar mais nada.
+3. **"Regras de fallback/erro na emissão"** — ✅ `withRetry` com backoff
+   exponencial, `status: "failed"` + `lastError` quando esgota tentativas,
+   alertas ativos (`AlertNotifier`), recuperação de notas travadas
+   (`recoverStuckInvoices`) e trilha de auditoria de cada falha.
+4. **"Como e quando será feita a automação do segundo gateway (Pix/parcelado)"**
+   — ⚠️ parcial, e o próprio documento já classifica isso como "próximo
+   passo futuro, fora do escopo imediato". O endpoint/schema
+   (`POST /webhooks/gateway2`) e o pipeline completo já existem; falta só a
+   integração real com o gateway de verdade quando ele existir.
+5. **"Formato de retentativa e alertas em caso de falha"** — ✅ backoff
+   exponencial configurável, `AlertNotifier` disparando em toda falha
+   (emissão, dados inconsistentes, estorno desconhecido, reconciliação),
+   consultável via `GET /alerts`, mais métricas (`GET /metrics`) para saúde
+   geral.
+
+Resumindo: dos 5 pontos, 3 estão resolvidos por completo (3 e 5, e o 1 na
+medida em que uma arquitetura foi de fato escolhida e implementada), 1 é
+parcial por decisão explícita do próprio documento (4), e 1 continua em
+aberto porque depende de informação que só existe fora deste repositório
+(2 — precisa de acesso real ao sistema da prefeitura).
 
 ## Além do documento: fechando lacunas de uma automação completa
 
@@ -159,6 +175,34 @@ adições cobrem isso:
     de notas emitidas/falhas/canceladas/recuperadas e a duração média da
     emissão, expostos via `GET /metrics`. Sem isso, a saúde da automação só
     é percebida quando um alerta de falha dispara.
+11. **Autenticação nos endpoints de operação** (`requireApiKey`,
+    `src/api/requireApiKey.ts`) — antes, `/invoices`, `/alerts`, `/metrics`
+    e todos os `/debug/*` estavam completamente abertos: qualquer um que
+    alcançasse o servidor lia dados de paciente (CPF, e-mail) ou disparava
+    simulações. Configurando `ADMIN_API_KEY`, essas rotas passam a exigir
+    `Authorization: Bearer <chave>` (comparação em tempo constante). Os
+    webhooks de pagamento e `/health` continuam públicos (têm sua própria
+    verificação de origem). Sem a variável configurada, nada muda —
+    permanece aberto para uso local/demo.
+12. **Rotas de debug fora de produção** (`enableDebugRoutes`) — os
+    endpoints `/debug/*` (simular nota travada, pagamento perdido, etc.) só
+    existem para demonstrar/testar os mecanismos de resiliência; não fazem
+    sentido expostos numa API de produção. Com `NODE_ENV=production`, essas
+    rotas nem são registradas (404), independente de autenticação.
+13. **Logging estruturado** (`src/lib/logger.ts`) — trocou `console.log`
+    solto por uma linha JSON por evento (`{level, message, context,
+    timestamp}`) no serviço principal e no startup/shutdown, para ser
+    consumível por uma ferramenta real de observabilidade (Datadog, ELK,
+    CloudWatch) em vez de texto livre.
+14. **Graceful shutdown** — antes, um `SIGTERM`/`SIGINT` (deploy, restart)
+    cortava qualquer emissão em background no meio. Agora o processo para
+    de aceitar conexões novas, espera as emissões em voo terminarem (com
+    timeout de 5s) e só então encerra (`InvoiceEmissionService.waitForIdle`).
+15. **Health check real** (`GET /health`) — antes sempre respondia `ok`
+    incondicionalmente. Com Supabase configurado, agora testa
+    conectividade de verdade (`select` leve na tabela `patients`) e
+    responde `503` se o banco estiver inacessível; em memória, responde
+    `ok` normalmente.
 
 ## Rodando localmente
 
@@ -245,6 +289,28 @@ Pacientes/médicos de exemplo (seed in-memory, ver
 `src/repositories/PatientDoctorRepository.ts`): `pat_1` (Ana Souza / Dr.
 Carlos Lima) e `pat_2` (Bruno Alves / Dra. Fernanda Rocha).
 
+Se `ADMIN_API_KEY` estiver configurada, as consultas acima (exceto
+`/webhooks/*` e `/health`) exigem o header
+`Authorization: Bearer <ADMIN_API_KEY>` — inclusive o painel visual em
+`public/index.html` deixa de funcionar sem ele, já que a página não tem
+como saber a chave. Para produção real, o certo seria um dashboard interno
+com seu próprio login, não a página estática de demo.
+
+## Simulação automática completa
+
+`scripts/demo.sh` dispara, em sequência, contra o servidor rodando: um
+pagamento Stripe normal, um Pix pelo segundo gateway, um cenário de
+prefeitura instável (retry), um pagamento com paciente inexistente (dado
+inconsistente), uma nota travada + recuperação, um pagamento perdido +
+reconciliação, e um pagamento seguido de estorno — depois imprime o estado
+final de `/invoices`, `/alerts` e `/metrics`. É a demonstração de ponta a
+ponta do fluxo TO-BE completo, sem intervenção manual:
+
+```bash
+npm run dev              # terminal 1
+bash scripts/demo.sh      # terminal 2
+```
+
 ## Testes
 
 ```bash
@@ -259,9 +325,10 @@ dados inconsistentes, os dois webhooks HTTP fim a fim (com o ack
 desacoplado — resposta rápida em `processing`, resultado final via
 polling), recuperação de notas travadas, estorno/cancelamento,
 reconciliação, verificação de assinatura do Stripe (assinatura válida,
-adulterada, segredo errado, timestamp expirado), trilha de auditoria e
-métricas. Rodam sempre contra as implementações in-memory — não tocam o
-Supabase real.
+adulterada, segredo errado, timestamp expirado), trilha de auditoria,
+métricas, autenticação por API key nos endpoints de operação, rotas de
+debug desabilitadas e health check customizado. Rodam sempre contra as
+implementações in-memory — não tocam o Supabase real.
 
 ## Como plugar as integrações reais
 
@@ -285,10 +352,6 @@ Supabase real.
 - Automação do segundo gateway de pagamento em produção (o endpoint já
   existe; falta a integração real, item citado no documento como "próximo
   passo futuro").
-- Autenticação/autorização dos endpoints de consulta e debug (`/invoices`,
-  `/alerts`, `/metrics`, `/debug/*`) — só os webhooks de pagamento têm
-  verificação de origem (assinatura Stripe / segredo compartilhado). Em
-  produção, esses endpoints de operação precisariam ficar atrás de auth.
 - Reconciliação real com a API do Stripe — `ReconciliationGateway` é mockado
   (lista o que foi injetado via `/debug/simulate-missed-payment`); em
   produção, implementaria `listRecentSuccessfulPayments` consultando
@@ -299,3 +362,8 @@ Supabase real.
 - Métricas em formato Prometheus/OpenTelemetry — hoje é um JSON simples
   (`GET /metrics`); em produção trocaria `InMemoryMetrics` por um client
   real (ex: `prom-client`), mesma interface.
+- Rate limiting nos webhooks públicos — nada impede hoje um volume anormal
+  de requisições em `/webhooks/*`.
+- Um dashboard interno de verdade para operação (com login próprio) — o
+  painel em `public/index.html` é deliberadamente uma ferramenta de
+  demonstração/teste local, não uma interface para o time financeiro.

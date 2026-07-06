@@ -12,10 +12,19 @@ import { PrefeituraMariliaMockClient } from "../../src/adapters/nfse/PrefeituraM
 import { MockReconciliationGateway } from "../../src/adapters/reconciliation/ReconciliationGateway.js";
 import { InMemoryInvoiceRepository } from "../../src/repositories/InvoiceRepository.js";
 import { InMemoryPatientDoctorRepository } from "../../src/repositories/PatientDoctorRepository.js";
+import type { HealthCheckResult } from "../../src/api/createApp.js";
 import { InvoiceEmissionService } from "../../src/services/InvoiceEmissionService.js";
 import { ReconciliationService } from "../../src/services/ReconciliationService.js";
 
-function buildTestApp(opts: { stripeWebhookSecret?: string; gateway2WebhookSecret?: string } = {}) {
+function buildTestApp(
+  opts: {
+    stripeWebhookSecret?: string;
+    gateway2WebhookSecret?: string;
+    adminApiKey?: string;
+    enableDebugRoutes?: boolean;
+    healthCheck?: () => Promise<HealthCheckResult>;
+  } = {},
+) {
   const invoiceRepository = new InMemoryInvoiceRepository();
   const alertNotifier = new InMemoryAlertNotifier();
   const auditTrail = new InMemoryAuditTrail();
@@ -49,6 +58,9 @@ function buildTestApp(opts: { stripeWebhookSecret?: string; gateway2WebhookSecre
     reconciliation: { service: reconciliationService, gateway: reconciliationGateway },
     auditTrail,
     metrics,
+    adminApiKey: opts.adminApiKey,
+    enableDebugRoutes: opts.enableDebugRoutes,
+    healthCheck: opts.healthCheck,
   });
 
   return { app, alertNotifier, invoiceRepository, auditTrail, metrics };
@@ -280,5 +292,110 @@ describe("GET /metrics", () => {
     const metrics = await request(app).get("/metrics");
     expect(metrics.status).toBe(200);
     expect(metrics.body.counters["invoices.issued"]).toBe(1);
+  });
+});
+
+describe("ADMIN_API_KEY protegendo endpoints de consulta/debug", () => {
+  it("rejeita sem o token e aceita com o token correto", async () => {
+    const { app } = buildTestApp({ adminApiKey: "top-secret" });
+
+    const withoutToken = await request(app).get("/invoices");
+    expect(withoutToken.status).toBe(401);
+
+    const wrongToken = await request(app).get("/invoices").set("authorization", "Bearer errado");
+    expect(wrongToken.status).toBe(401);
+
+    const withToken = await request(app).get("/invoices").set("authorization", "Bearer top-secret");
+    expect(withToken.status).toBe(200);
+  });
+
+  it("tambem protege /alerts, /metrics, /invoices/:id/audit e as rotas de debug/reconciliacao", async () => {
+    const { app } = buildTestApp({ adminApiKey: "top-secret" });
+
+    const endpoints = [
+      { method: "get", path: "/alerts" },
+      { method: "get", path: "/metrics" },
+      { method: "get", path: "/invoices/algum-id/audit" },
+      { method: "post", path: "/debug/recover-stuck" },
+      { method: "post", path: "/debug/simulate-stuck-invoice" },
+      { method: "post", path: "/debug/simulate-missed-payment" },
+      { method: "post", path: "/reconciliation/run" },
+    ] as const;
+
+    for (const { method, path } of endpoints) {
+      const response = await request(app)[method](path).send({});
+      expect(response.status, `${method.toUpperCase()} ${path} deveria exigir autenticacao`).toBe(401);
+    }
+  });
+
+  it("nao afeta os webhooks de pagamento nem o health check", async () => {
+    const { app } = buildTestApp({ adminApiKey: "top-secret" });
+
+    const health = await request(app).get("/health");
+    expect(health.status).toBe(200);
+
+    const payment = await request(app)
+      .post("/webhooks/stripe")
+      .send({
+        id: "evt_auth_ok",
+        type: "payment_intent.succeeded",
+        data: { object: { id: "pi_auth_ok", amount: 1000, currency: "brl", metadata: { patient_id: "pat_1" } } },
+      });
+    expect(payment.status).toBe(202);
+  });
+});
+
+describe("enableDebugRoutes", () => {
+  it("retorna 404 para rotas de debug quando desabilitadas", async () => {
+    const { app } = buildTestApp({ enableDebugRoutes: false });
+
+    const responses = await Promise.all([
+      request(app).post("/debug/recover-stuck").send({}),
+      request(app).post("/debug/simulate-stuck-invoice").send({}),
+      request(app).post("/debug/simulate-missed-payment").send({ patientId: "pat_1", amountCents: 100 }),
+    ]);
+
+    for (const response of responses) {
+      expect(response.status).toBe(404);
+    }
+  });
+
+  it("nao afeta as rotas normais de negocio", async () => {
+    const { app } = buildTestApp({ enableDebugRoutes: false });
+
+    const response = await request(app)
+      .post("/webhooks/stripe")
+      .send({
+        id: "evt_debug_disabled",
+        type: "payment_intent.succeeded",
+        data: { object: { id: "pi_debug_disabled", amount: 1000, currency: "brl", metadata: { patient_id: "pat_1" } } },
+      });
+    expect(response.status).toBe(202);
+
+    const runReconciliation = await request(app).post("/reconciliation/run").send();
+    expect(runReconciliation.status).toBe(200);
+  });
+});
+
+describe("GET /health", () => {
+  it("usa o status 'ok' padrao quando nenhum healthCheck customizado e fornecido", async () => {
+    const { app } = buildTestApp();
+    const response = await request(app).get("/health");
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("ok");
+  });
+
+  it("reflete um healthCheck customizado saudavel", async () => {
+    const { app } = buildTestApp({ healthCheck: async () => ({ ok: true, details: "supabase reachable" }) });
+    const response = await request(app).get("/health");
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ status: "ok", details: "supabase reachable" });
+  });
+
+  it("retorna 503 quando o healthCheck customizado reporta problema", async () => {
+    const { app } = buildTestApp({ healthCheck: async () => ({ ok: false, details: "supabase: connection refused" }) });
+    const response = await request(app).get("/health");
+    expect(response.status).toBe(503);
+    expect(response.body.status).toBe("degraded");
   });
 });

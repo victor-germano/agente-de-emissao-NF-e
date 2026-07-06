@@ -9,6 +9,7 @@ import { normalizeSecondGatewayEvent, normalizeStripeEvent, normalizeStripeRefun
 import type { MockReconciliationGateway } from "../adapters/reconciliation/ReconciliationGateway.js";
 import { SecondGatewayEventSchema, StripeEventSchema } from "../adapters/paymentGateway/schemas.js";
 import { verifyStripeSignature } from "../adapters/paymentGateway/stripeSignature.js";
+import { requireApiKey } from "./requireApiKey.js";
 import type { InvoiceEmissionService } from "../services/InvoiceEmissionService.js";
 import type { ReconciliationService } from "../services/ReconciliationService.js";
 import type { InvoiceRepository } from "../repositories/InvoiceRepository.js";
@@ -32,6 +33,11 @@ export interface ReconciliationDeps {
   gateway: MockReconciliationGateway;
 }
 
+export interface HealthCheckResult {
+  ok: boolean;
+  details?: string;
+}
+
 export interface CreateAppDeps {
   invoiceEmissionService: InvoiceEmissionService;
   invoiceRepository: InvoiceRepository;
@@ -49,6 +55,21 @@ export interface CreateAppDeps {
   auditTrail?: AuditTrail;
   /** Se presente, expoe GET /metrics. */
   metrics?: Metrics;
+  /**
+   * Protege /invoices, /alerts, /metrics, /debug/* e /reconciliation/* com
+   * `Authorization: Bearer <chave>`. Se ausente, esses endpoints ficam
+   * abertos (conveniente para o painel local/demo) — sem isso, qualquer um
+   * que alcance o servidor le dados de paciente ou dispara simulacoes.
+   */
+  adminApiKey?: string;
+  /**
+   * Registra ou nao as rotas /debug/*. Default: true. Em producao (ver
+   * `config.env` em `src/index.ts`) deve vir `false` — endpoints de
+   * simulacao nao tem motivo para existir fora de ambiente local/teste.
+   */
+  enableDebugRoutes?: boolean;
+  /** Checagem de saude customizada (ex: conectividade com o Supabase). Default: sempre ok. */
+  healthCheck?: () => Promise<HealthCheckResult>;
 }
 
 const FailureRateSchema = z.object({ rate: z.number().min(0).max(1) });
@@ -65,6 +86,9 @@ const RecoverStuckSchema = z.object({ olderThanMs: z.number().int().nonnegative(
 
 export function createApp(deps: CreateAppDeps): Express {
   const app = express();
+  const protect = requireApiKey(deps.adminApiKey);
+  const debugRoutesEnabled = deps.enableDebugRoutes !== false;
+
   app.use(
     express.json({
       verify: (req, _res, buf) => {
@@ -74,18 +98,23 @@ export function createApp(deps: CreateAppDeps): Express {
   );
   app.use(express.static(path.join(process.cwd(), "public")));
 
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok" });
-  });
+  app.get("/health", asyncHandler(async (_req, res) => {
+    if (!deps.healthCheck) {
+      res.json({ status: "ok" });
+      return;
+    }
+    const result = await deps.healthCheck();
+    res.status(result.ok ? 200 : 503).json({ status: result.ok ? "ok" : "degraded", details: result.details });
+  }));
 
-  if (deps.nfseMockControl) {
+  if (deps.nfseMockControl && debugRoutesEnabled) {
     const control = deps.nfseMockControl;
 
-    app.get("/debug/nfse-failure-rate", (_req, res) => {
+    app.get("/debug/nfse-failure-rate", protect, (_req, res) => {
       res.json({ rate: control.getFailureRate() });
     });
 
-    app.post("/debug/nfse-failure-rate", asyncHandler(async (req, res) => {
+    app.post("/debug/nfse-failure-rate", protect, asyncHandler(async (req, res) => {
       const { rate } = FailureRateSchema.parse(req.body);
       control.setFailureRate(rate);
       res.json({ rate });
@@ -140,15 +169,15 @@ export function createApp(deps: CreateAppDeps): Express {
     res.status(200).json({ received: true });
   });
 
-  app.get("/invoices", asyncHandler(async (_req, res) => {
+  app.get("/invoices", protect, asyncHandler(async (_req, res) => {
     res.json(await deps.invoiceRepository.list());
   }));
 
-  app.get("/invoices/failed", asyncHandler(async (_req, res) => {
+  app.get("/invoices/failed", protect, asyncHandler(async (_req, res) => {
     res.json(await deps.invoiceRepository.listByStatus("failed"));
   }));
 
-  app.get("/invoices/:id", asyncHandler(async (req, res) => {
+  app.get("/invoices/:id", protect, asyncHandler(async (req, res) => {
     const invoice = await deps.invoiceRepository.findById(req.params.id ?? "");
     if (!invoice) {
       res.status(404).json({ error: "invoice not found" });
@@ -159,44 +188,46 @@ export function createApp(deps: CreateAppDeps): Express {
 
   if (deps.auditTrail) {
     const auditTrail = deps.auditTrail;
-    app.get("/invoices/:id/audit", asyncHandler(async (req, res) => {
+    app.get("/invoices/:id/audit", protect, asyncHandler(async (req, res) => {
       res.json(await auditTrail.listForInvoice(req.params.id ?? ""));
     }));
   }
 
   if (deps.metrics) {
     const metrics = deps.metrics;
-    app.get("/metrics", (_req, res) => {
+    app.get("/metrics", protect, (_req, res) => {
       res.json(metrics.snapshot());
     });
   }
 
-  app.post("/debug/recover-stuck", asyncHandler(async (req, res) => {
-    const { olderThanMs } = RecoverStuckSchema.parse(req.body ?? {});
-    const result = await deps.invoiceEmissionService.recoverStuckInvoices(olderThanMs ?? deps.recoveryDefaultThresholdMs ?? 0);
-    res.json(result);
-  }));
+  if (debugRoutesEnabled) {
+    app.post("/debug/recover-stuck", protect, asyncHandler(async (req, res) => {
+      const { olderThanMs } = RecoverStuckSchema.parse(req.body ?? {});
+      const result = await deps.invoiceEmissionService.recoverStuckInvoices(olderThanMs ?? deps.recoveryDefaultThresholdMs ?? 0);
+      res.json(result);
+    }));
 
-  app.post("/debug/simulate-stuck-invoice", asyncHandler(async (req, res) => {
-    const { patientId, amountCents, stuckForMs } = SimulateStuckInvoiceSchema.parse(req.body ?? {});
-    const stuckAt = new Date(Date.now() - stuckForMs).toISOString();
-    const invoice = await deps.invoiceRepository.create({
-      id: randomUUID(),
-      paymentExternalId: `simulated_stuck_${randomUUID()}`,
-      patientId,
-      doctorId: null,
-      amountCents,
-      status: "processing",
-      attempts: 0,
-      createdAt: stuckAt,
-      updatedAt: stuckAt,
-    });
-    res.status(201).json(invoice);
-  }));
+    app.post("/debug/simulate-stuck-invoice", protect, asyncHandler(async (req, res) => {
+      const { patientId, amountCents, stuckForMs } = SimulateStuckInvoiceSchema.parse(req.body ?? {});
+      const stuckAt = new Date(Date.now() - stuckForMs).toISOString();
+      const invoice = await deps.invoiceRepository.create({
+        id: randomUUID(),
+        paymentExternalId: `simulated_stuck_${randomUUID()}`,
+        patientId,
+        doctorId: null,
+        amountCents,
+        status: "processing",
+        attempts: 0,
+        createdAt: stuckAt,
+        updatedAt: stuckAt,
+      });
+      res.status(201).json(invoice);
+    }));
+  }
 
   if (deps.alertFeed) {
     const alertFeed = deps.alertFeed;
-    app.get("/alerts", (_req, res) => {
+    app.get("/alerts", protect, (_req, res) => {
       res.json(alertFeed.getRecent(50));
     });
   }
@@ -204,23 +235,25 @@ export function createApp(deps: CreateAppDeps): Express {
   if (deps.reconciliation) {
     const { service, gateway } = deps.reconciliation;
 
-    app.post("/reconciliation/run", asyncHandler(async (_req, res) => {
+    app.post("/reconciliation/run", protect, asyncHandler(async (_req, res) => {
       res.json(await service.run());
     }));
 
-    app.post("/debug/simulate-missed-payment", asyncHandler(async (req, res) => {
-      const { patientId, amountCents } = SimulateMissedPaymentSchema.parse(req.body);
-      const event = {
-        externalId: `simulated_missed_${randomUUID()}`,
-        source: "stripe" as const,
-        patientId,
-        amountCents,
-        currency: "brl",
-        occurredAt: new Date().toISOString(),
-      };
-      gateway.addSimulatedPayment(event);
-      res.status(201).json(event);
-    }));
+    if (debugRoutesEnabled) {
+      app.post("/debug/simulate-missed-payment", protect, asyncHandler(async (req, res) => {
+        const { patientId, amountCents } = SimulateMissedPaymentSchema.parse(req.body);
+        const event = {
+          externalId: `simulated_missed_${randomUUID()}`,
+          source: "stripe" as const,
+          patientId,
+          amountCents,
+          currency: "brl",
+          occurredAt: new Date().toISOString(),
+        };
+        gateway.addSimulatedPayment(event);
+        res.status(201).json(event);
+      }));
+    }
   }
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

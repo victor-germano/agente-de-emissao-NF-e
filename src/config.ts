@@ -7,6 +7,7 @@ function num(value: string | undefined, fallback: number): number {
 }
 
 export const config = {
+  env: process.env.NODE_ENV || "development",
   port: num(process.env.PORT, 3000),
   appNotificationWebhookUrl: process.env.APP_NOTIFICATION_WEBHOOK_URL || undefined,
   nfse: {
@@ -20,6 +21,7 @@ export const config = {
   security: {
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || undefined,
     gateway2WebhookSecret: process.env.GATEWAY2_WEBHOOK_SECRET || undefined,
+    adminApiKey: process.env.ADMIN_API_KEY || undefined,
   },
   recovery: {
     stuckInvoiceThresholdMs: num(process.env.STUCK_INVOICE_THRESHOLD_MS, 60_000),
