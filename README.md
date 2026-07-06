@@ -115,6 +115,27 @@ parcial por decisão explícita do próprio documento (4), e 1 continua em
 aberto porque depende de informação que só existe fora deste repositório
 (2 — precisa de acesso real ao sistema da prefeitura).
 
+### Comparativo de gateways de NFS-e (para destravar o ponto 2)
+
+O ponto 2 não fecha com código — precisa de uma conta/credencial real em um
+destes provedores (ou acesso direto à Sigcorp). Pesquisa feita para
+facilitar essa decisão:
+
+| | **Focus NFe** | **eNotas** | **NFE.io** |
+|---|---|---|---|
+| Preço de entrada | R$89,90/mês (100 notas) | R$137/mês (60 notas) + taxa de adesão R$179 | Não divulgado — só sob consulta comercial |
+| Trial/sandbox gratuito | ✅ 30 dias, sem taxa de setup | Ambiente de homologação separado, mas com taxa de adesão já na entrada | Existe, mas foco em contas com 50+ notas/mês |
+| Transparência de preço | Alta — planos públicos na própria página | Média — valores não estão fáceis de achar na própria página | Baixa — preciso falar com vendas |
+| Documentação | Boa; URL de homologação clara (`homologacao.focusnfe.com.br`) + coleção pública no Postman | Portal de dev dedicado (`developer.enotasgw.com.br`) | SDKs oficiais prontos (Node.js, PHP, Ruby) |
+| Perfil de cliente | Startups/pequenas empresas, 1-poucos CNPJs | Empresas com fluxo de notas recorrente (assinaturas, faturas) | Empresas maiores, via time comercial |
+
+**Recomendação**: **Focus NFe** para o estágio atual da VYX — preço
+transparente, trial de 30 dias sem custo de entrada, documentação pública
+suficiente pra implementar e testar sem depender de uma reunião comercial
+antes. Assim que houver credenciais de homologação de qualquer um desses
+provedores, a implementação real do `NFSeClient` é direta — a interface já
+está pronta para receber.
+
 ## Além do documento: fechando lacunas de uma automação completa
 
 O documento original cobre o caminho feliz e lista pontos em aberto, mas
