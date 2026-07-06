@@ -108,10 +108,19 @@
   .audit-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
   .audit-entry { border-left: 3px solid var(--accent); padding: 4px 10px; font-size: 13px; }
   .audit-entry .audit-meta { color: var(--muted); font-size: 12px; }
+  .nav { display: flex; gap: 8px; }
+  .nav a { padding: 6px 12px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 600; color: var(--muted); border: 1px solid transparent; }
+  .nav a.active { color: var(--accent); border-color: var(--accent); }
+  .nav a:hover { color: var(--accent); }
 </style>
 </head>
 <body>
 <main>
+  <nav class="nav">
+    <a href="/index.html" class="active">Painel de simulação</a>
+    <a href="/overview.html">Visão geral do projeto</a>
+  </nav>
+
   <div>
     <h1>VYX — Simulador de Emissão de NFS-e</h1>
     <p class="subtitle">Dispara eventos simulados contra este servidor local para exercitar o fluxo completo: pagamento → emissão → e-mail → notificação, além de estorno, notas travadas, reconciliação e alertas.</p>
