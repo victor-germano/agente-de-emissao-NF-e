@@ -17,6 +17,8 @@ import type { InvoiceRepository } from "../repositories/InvoiceRepository.js";
 export interface NFSeMockControl {
   getFailureRate(): number;
   setFailureRate(rate: number): void;
+  getApiToken(): string | undefined;
+  setApiToken(token: string | undefined): void;
 }
 
 export interface AlertFeed {
@@ -73,6 +75,7 @@ export interface CreateAppDeps {
 }
 
 const FailureRateSchema = z.object({ rate: z.number().min(0).max(1) });
+const ApiTokenSchema = z.object({ token: z.string().optional() });
 const SimulateMissedPaymentSchema = z.object({
   patientId: z.string(),
   amountCents: z.number().int().positive(),
@@ -118,6 +121,17 @@ export function createApp(deps: CreateAppDeps): Express {
       const { rate } = FailureRateSchema.parse(req.body);
       control.setFailureRate(rate);
       res.json({ rate });
+    }));
+
+    app.get("/debug/nfse-api-token", protect, (_req, res) => {
+      const token = control.getApiToken();
+      res.json({ configured: token !== undefined, token: token ?? null });
+    });
+
+    app.post("/debug/nfse-api-token", protect, asyncHandler(async (req, res) => {
+      const { token } = ApiTokenSchema.parse(req.body ?? {});
+      control.setApiToken(token);
+      res.json({ configured: control.getApiToken() !== undefined, token: control.getApiToken() ?? null });
     }));
   }
 

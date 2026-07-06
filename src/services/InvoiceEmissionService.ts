@@ -324,17 +324,18 @@ export class InvoiceEmissionService {
       return issued;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[invoice-service] Emissao falhou apos retentativas para pagamento ${invoice.paymentExternalId}: ${message}`);
+      const attempts = (error as { attempts?: number })?.attempts ?? this.deps.retryOptions.maxAttempts;
+      this.logger.error(`[invoice-service] Emissao falhou apos ${attempts} tentativa(s) para pagamento ${invoice.paymentExternalId}: ${message}`);
       this.deps.metrics.increment("invoices.failed");
       await this.deps.alertNotifier.send({
         severity: "critical",
         title: "Falha ao emitir NFS-e",
         message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}): ${message}`,
-        context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId },
+        context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId, attempts },
       });
       const failed = await this.deps.invoiceRepository.update(invoice.id, {
         status: "failed",
-        attempts: this.deps.retryOptions.maxAttempts,
+        attempts,
         lastError: message,
       });
       await this.deps.auditTrail.record({

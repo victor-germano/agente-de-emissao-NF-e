@@ -81,9 +81,19 @@ O documento lista 5 perguntas explícitas para o dev definir/testar. Status de c
    real do desenho original. Isso é uma decisão de arquitetura para
    discutir na entrevista, não um espaço em branco.
 2. **"Forma de integração com o site da Prefeitura de Marília: API oficial
-   ou RPA/navegador headless?"** — ❌ genuinamente não respondida, e não dá
-   para responder sem acesso real ao sistema da prefeitura. Isolado atrás de
-   `NFSeClient` — qualquer uma das duas abordagens entra sem mudar mais nada.
+   ou RPA/navegador headless?"** — ❌ genuinamente não respondida (não dá
+   para decidir sem acesso real), mas pesquisei o suficiente pra dar um
+   próximo passo concreto: Marília usa o sistema **ISS-Eletrônico**,
+   operado pela **Sigiss/Sigcorp** (`marilia.sigiss.com.br`), com acesso via
+   login/senha (não API key/certificado) mediante cadastro — quem ainda não
+   tem, solicita homologação em `suporte@sigcorp.com.br`. Na prática, porém,
+   o caminho mais comum é **não** integrar direto com a prefeitura: gateways
+   como **Focus NFe**, **eNotas** e **NFE.io** já têm Marília mapeada e
+   expõem uma API REST própria autenticada por token simples — recomendo
+   esse caminho em vez de implementar ABRASF/SOAP na mão. `NFSeClient`
+   isola essa decisão; qualquer uma das abordagens entra sem mudar mais
+   nada. `PrefeituraMariliaMockClient` já simula esse padrão de token (ver
+   `NFSE_API_TOKEN` abaixo), como um ensaio para a integração real.
 3. **"Regras de fallback/erro na emissão"** — ✅ `withRetry` com backoff
    exponencial, `status: "failed"` + `lastError` quando esgota tentativas,
    alertas ativos (`AlertNotifier`), recuperação de notas travadas
@@ -203,6 +213,15 @@ adições cobrem isso:
     conectividade de verdade (`select` leve na tabela `patients`) e
     responde `503` se o banco estiver inacessível; em memória, responde
     `ok` normalmente.
+16. **Token de API simulado para a Prefeitura** (`NFSE_API_TOKEN`,
+    `PrefeituraMariliaMockClient`) — ensaia o padrão de autenticação de um
+    gateway real (Focus NFe/eNotas/NFE.io, ver ponto 2 acima). Vazio =
+    checagem pulada (compatível com o comportamento anterior); configurado,
+    exige o valor `sandbox_focusnfe_demo_2026` — qualquer outro falha com
+    `401` simulado. Esse erro é marcado como **não-retryable**: uma
+    credencial errada não vira certa sozinha entre uma tentativa e outra,
+    então `withRetry` para imediatamente em vez de insistir 3x à toa (bug
+    real que apareceu ao testar isso e foi corrigido — ver `src/core/retry.ts`).
 
 ## Rodando localmente
 
@@ -275,7 +294,7 @@ Consultar: `GET /invoices`, `GET /invoices/:id`, `GET /invoices/failed`,
 
 Outros endpoints de debug/operação: `POST /debug/simulate-stuck-invoice`,
 `POST /debug/recover-stuck`, `POST /debug/simulate-missed-payment`,
-`POST /reconciliation/run`.
+`POST /reconciliation/run`, `GET`/`POST /debug/nfse-api-token` (ver ponto 16).
 
 Note que `POST /webhooks/stripe` e `POST /webhooks/gateway2` respondem
 `202` com a invoice em `status: "processing"` quase imediatamente — a
@@ -327,8 +346,10 @@ polling), recuperação de notas travadas, estorno/cancelamento,
 reconciliação, verificação de assinatura do Stripe (assinatura válida,
 adulterada, segredo errado, timestamp expirado), trilha de auditoria,
 métricas, autenticação por API key nos endpoints de operação, rotas de
-debug desabilitadas e health check customizado. Rodam sempre contra as
-implementações in-memory — não tocam o Supabase real.
+debug desabilitadas, health check customizado, token de API simulado da
+prefeitura (válido/inválido/ausente) e erros não-retryable interrompendo o
+retry imediatamente com o número real de tentativas registrado. Rodam
+sempre contra as implementações in-memory — não tocam o Supabase real.
 
 ## Como plugar as integrações reais
 

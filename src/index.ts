@@ -49,6 +49,7 @@ const metrics = new InMemoryMetrics();
 const nfseClient = new PrefeituraMariliaMockClient({
   failureRate: config.nfse.mockFailureRate,
   latencyMs: config.nfse.mockLatencyMs,
+  apiToken: config.nfse.apiToken,
 });
 
 const invoiceEmissionService = new InvoiceEmissionService({

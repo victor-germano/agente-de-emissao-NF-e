@@ -27,15 +27,23 @@ export interface NFSeClient {
 }
 
 export class NFSeEmissionError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  /** false para erros que nao adianta retentar (ex: credencial invalida). Default: true. */
+  readonly retryable: boolean;
+
+  constructor(message: string, readonly cause?: unknown, retryable = true) {
     super(message);
     this.name = "NFSeEmissionError";
+    this.retryable = retryable;
   }
 }
 
 export class NFSeCancellationError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  /** false para erros que nao adianta retentar (ex: credencial invalida). Default: true. */
+  readonly retryable: boolean;
+
+  constructor(message: string, readonly cause?: unknown, retryable = true) {
     super(message);
     this.name = "NFSeCancellationError";
+    this.retryable = retryable;
   }
 }

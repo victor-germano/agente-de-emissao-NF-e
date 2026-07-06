@@ -13,6 +13,7 @@ export const config = {
   nfse: {
     mockFailureRate: num(process.env.NFSE_MOCK_FAILURE_RATE, 0),
     mockLatencyMs: num(process.env.NFSE_MOCK_LATENCY_MS, 150),
+    apiToken: process.env.NFSE_API_TOKEN || undefined,
   },
   retry: {
     maxAttempts: num(process.env.NFSE_RETRY_MAX_ATTEMPTS, 3),

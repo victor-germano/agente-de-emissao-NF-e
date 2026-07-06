@@ -165,6 +165,18 @@
     </section>
 
     <section class="panel">
+      <h2>Token de API simulado (gateway real)</h2>
+      <div class="row">
+        <label>Token
+          <input id="nfse-api-token" type="text" placeholder="vazio = sem autenticação" />
+        </label>
+        <button id="apply-api-token" type="button" class="secondary">Aplicar</button>
+      </div>
+      <p class="hint" id="api-token-status"></p>
+      <p class="hint">Simula a autenticação de um gateway real (Focus NFe/eNotas/NFE.io — já integrados com Marília). Vazio = sem checagem. Token válido no mock: <code>sandbox_focusnfe_demo_2026</code>. Qualquer outro valor falha com 401 simulado.</p>
+    </section>
+
+    <section class="panel">
       <h2>Notas travadas (crash-safety)</h2>
       <div class="row">
         <label>Paciente
@@ -355,6 +367,27 @@
       const body = await res.json();
       document.getElementById("failure-rate").value = Math.round(body.rate * 100);
       document.getElementById("failure-rate-status").textContent = "Taxa atual: " + Math.round(body.rate * 100) + "%";
+    } catch {}
+  }
+
+  document.getElementById("apply-api-token").addEventListener("click", async () => {
+    const token = document.getElementById("nfse-api-token").value.trim();
+    const res = await fetch("/debug/nfse-api-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const body = await res.json();
+    document.getElementById("api-token-status").textContent = body.configured ? "Autenticação simulada ativa (token: " + body.token + ")" : "Sem autenticação (checagem pulada)";
+  });
+
+  async function loadApiToken() {
+    try {
+      const res = await fetch("/debug/nfse-api-token");
+      if (!res.ok) return;
+      const body = await res.json();
+      document.getElementById("nfse-api-token").value = body.token || "";
+      document.getElementById("api-token-status").textContent = body.configured ? "Autenticação simulada ativa (token: " + body.token + ")" : "Sem autenticação (checagem pulada)";
     } catch {}
   }
 
@@ -551,6 +584,7 @@
   document.getElementById("refresh").addEventListener("click", refreshAll);
 
   loadFailureRate();
+  loadApiToken();
   refreshAll();
   setInterval(refreshAll, 2000);
 </script>

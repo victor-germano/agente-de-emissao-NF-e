@@ -134,8 +134,20 @@ describe("InvoiceEmissionService", () => {
 
     expect(invoice.status).toBe("failed");
     expect(invoice.lastError).toContain("prefeitura fora do ar");
+    expect(invoice.attempts).toBe(3);
     expect(alertNotifier.send).toHaveBeenCalledWith(expect.objectContaining({ severity: "critical" }));
     expect(metrics.snapshot().counters["invoices.failed"]).toBe(1);
+  });
+
+  it("nao insiste em retentativas quando o erro e nao-retryable (ex: credencial invalida), e registra o numero real de tentativas", async () => {
+    const emit = vi.fn().mockRejectedValue(new NFSeEmissionError("401 Unauthorized: token invalido", undefined, false));
+    const { service } = makeService({ emit, cancel: vi.fn() });
+
+    const invoice = await service.processPayment(makeEvent());
+
+    expect(invoice.status).toBe("failed");
+    expect(invoice.attempts).toBe(1);
+    expect(emit).toHaveBeenCalledTimes(1);
   });
 
   it("marca a invoice como failed e dispara alerta quando o paciente nao e encontrado (dado inconsistente)", async () => {

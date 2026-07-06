@@ -32,4 +32,14 @@ describe("withRetry", () => {
     await expect(withRetry(fn, { maxAttempts: 2, baseDelayMs: 1, sleep: async () => {} })).rejects.toThrow("sempre falha");
     expect(fn).toHaveBeenCalledTimes(2);
   });
+
+  it("nao retenta um erro marcado como retryable: false, mesmo com tentativas restantes", async () => {
+    const error = Object.assign(new Error("credencial invalida"), { retryable: false });
+    const fn = vi.fn().mockRejectedValue(error);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(withRetry(fn, { maxAttempts: 5, baseDelayMs: 10, sleep })).rejects.toThrow("credencial invalida");
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
 });
