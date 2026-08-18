@@ -1,20 +1,20 @@
-# 🧾 Agente de IA — Emissor NF-e
+# Agente de IA — Emissor NF-e
 
 > Projeto em desenvolvimento para automação de emissão de Nota Fiscal Eletrônica (NF-e), construído com apoio do Claude Code. Objetivo final: validar dados, gerar o XML no padrão SEFAZ, assinar digitalmente, transmitir e entregar o PDF ao destinatário.
 
 ---
 
-## 📌 Sobre o Projeto
+## Sobre o Projeto
 
-Este projeto é um agente para automatizar o processo de emissão de Nota Fiscal Eletrônica (NF-e), pensado para substituir fluxos manuais e ferramentas avulsas (N8N, scripts soltos) por um único sistema. Ainda **em desenvolvimento inicial** — a etapa de validação de dados e geração do XML já está implementada e testada; assinatura digital, transmissão à SEFAZ e geração de PDF ainda não existem (ver Roadmap).
+Este projeto é um agente para automatizar o processo de emissão de Nota Fiscal Eletrônica (NF-e), pensado para substituir fluxos manuais e ferramentas avulsas (N8N, scripts soltos) por um único sistema. Em desenvolvimento inicial: a etapa de validação de dados e geração do XML já está implementada e testada; assinatura digital, transmissão à SEFAZ e geração de PDF ainda não existem (ver Roadmap).
 
-Pensado inicialmente para empresas de **tecnologia e medicina**, mas adaptável a qualquer segmento.
+Pensado inicialmente para empresas de tecnologia e medicina, mas adaptável a qualquer segmento.
 
 ---
 
-## ⚡ Status atual
+## Status atual
 
-### ✅ Implementado
+### Implementado
 
 - Modelagem dos dados da nota (destinatário, endereço, produtos)
 - Validação de CNPJ, CPF, CEP, NCM e CFOP (dígitos verificadores reais)
@@ -22,7 +22,7 @@ Pensado inicialmente para empresas de **tecnologia e medicina**, mas adaptável 
 - 17 testes automatizados cobrindo validadores e geração de XML
 - CI no GitHub Actions rodando a suíte a cada push/PR
 
-### 🚧 Planejado (ver Roadmap)
+### Planejado (ver Roadmap)
 
 - Geração do XML no schema oficial NF-e 4.0 da SEFAZ
 - Assinatura digital com certificado A1/A3
@@ -32,38 +32,38 @@ Pensado inicialmente para empresas de **tecnologia e medicina**, mas adaptável 
 
 ---
 
-## 🧠 Como Funciona (fluxo alvo)
+## Fluxo alvo
 
 ```
 Entrada de dados (JSON/formulário/API)
-        ↓
-Validação dos dados                      ← implementado
-        ↓
-Geração do XML                           ← implementado (formato interno)
-        ↓
-Geração do XML no schema oficial SEFAZ   ← planejado
-        ↓
-Assinatura digital (certificado A1/A3)   ← planejado
-        ↓
-Transmissão à SEFAZ                      ← planejado
-        ↓
-Geração do DANFE em PDF + envio          ← planejado
+        |
+Validação dos dados                      [implementado]
+        |
+Geração do XML                           [implementado — formato interno]
+        |
+Geração do XML no schema oficial SEFAZ   [planejado]
+        |
+Assinatura digital (certificado A1/A3)   [planejado]
+        |
+Transmissão à SEFAZ                      [planejado]
+        |
+Geração do DANFE em PDF + envio          [planejado]
 ```
 
 ---
 
-## 🛠️ Tecnologias
+## Tecnologias
 
 | Camada | Tecnologia |
 |---|---|
 | Linguagem | Python 3.11+ |
-| Validação e modelagem | dataclasses, `xml.etree.ElementTree` (stdlib) |
+| Validação e modelagem | dataclasses, xml.etree.ElementTree (stdlib) |
 | Testes | pytest |
 | CI | GitHub Actions |
 
 ---
 
-## 🚀 Como Usar
+## Como Usar
 
 ### Pré-requisitos
 
@@ -127,7 +127,7 @@ Notas inválidas levantam `NotaInvalidaError` com a lista de problemas encontrad
 
 ---
 
-## 📁 Estrutura do Projeto
+## Estrutura do Projeto
 
 ```
 agente-de-emissao-NF-e/
@@ -147,36 +147,36 @@ agente-de-emissao-NF-e/
 
 ---
 
-## 🔒 Segurança
+## Segurança
 
-- Certificados digitais **nunca versionados** (`.gitignore`)
+- Certificados digitais nunca versionados (`.gitignore`)
 - Credenciais carregadas exclusivamente via variáveis de ambiente
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
-- [ ] XML no schema oficial NF-e 4.0 da SEFAZ
-- [ ] Assinatura digital com certificado A1/A3
-- [ ] Transmissão à SEFAZ (homologação e produção)
-- [ ] Tratamento de rejeições e cancelamento/CC-e
-- [ ] Geração do DANFE em PDF
-- [ ] Envio automático por e-mail
-- [ ] API REST para emissão via HTTP
-- [ ] Interface web para emissão manual
-
----
-
-## 👨‍💻 Autor
-
-**Victor Germano** — Desenvolvedor Web Full Stack · IA & Automação
-
-- 🌐 [vgermano1711.github.io/portfolio-germano-dev](https://vgermano1711.github.io/portfolio-germano-dev)
-- 📧 dev.germanoo@gmail.com
-- 💼 [linkedin.com/in/victor-germano-65787b2b1](https://linkedin.com/in/victor-germano-65787b2b1)
+- XML no schema oficial NF-e 4.0 da SEFAZ
+- Assinatura digital com certificado A1/A3
+- Transmissão à SEFAZ (homologação e produção)
+- Tratamento de rejeições e cancelamento/CC-e
+- Geração do DANFE em PDF
+- Envio automático por e-mail
+- API REST para emissão via HTTP
+- Interface web para emissão manual
 
 ---
 
-## 📄 Licença
+## Autor
+
+**Victor Germano** — Desenvolvedor Web Full Stack, IA & Automação
+
+- Portfólio: [vgermano1711.github.io/portfolio-germano-dev](https://vgermano1711.github.io/portfolio-germano-dev)
+- E-mail: dev.germanoo@gmail.com
+- LinkedIn: [linkedin.com/in/victor-germano-65787b2b1](https://linkedin.com/in/victor-germano-65787b2b1)
+
+---
+
+## Licença
 
 MIT License — sinta-se livre para usar, estudar e adaptar com os devidos créditos.
