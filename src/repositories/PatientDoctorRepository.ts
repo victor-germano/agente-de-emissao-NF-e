@@ -15,6 +15,12 @@ interface SeedRecord {
   doctor: Doctor;
 }
 
+// Espelha o seed real do Supabase (ver README) para que o painel local funcione
+// identicamente nos dois modos de persistencia. Excecao: pat_3 no Supabase tem duas
+// consultas (troca de medico, doc_1 -> doc_3) para exercitar a regra "ultimo medico que
+// atendeu o paciente" com historico de verdade - este repositorio in-memory nao modela
+// historico de consultas, entao guarda direto o resultado final (doc_3) sem a
+// demonstracao do "switch" em si, que so aparece rodando contra o Supabase real.
 const SEED: SeedRecord[] = [
   {
     patient: { id: "pat_1", name: "Ana Souza", email: "ana.souza@example.com", cpf: "111.111.111-11" },
@@ -23,6 +29,14 @@ const SEED: SeedRecord[] = [
   {
     patient: { id: "pat_2", name: "Bruno Alves", email: "bruno.alves@example.com", cpf: "222.222.222-22" },
     doctor: { id: "doc_2", name: "Dra. Fernanda Rocha", crm: "CRM-SP 54321" },
+  },
+  {
+    patient: { id: "pat_3", name: "Camila Ferreira", email: "camila.ferreira@example.com", cpf: "333.333.333-33" },
+    doctor: { id: "doc_3", name: "Dr. Eduardo Santos", crm: "CRM-SP 33333" },
+  },
+  {
+    patient: { id: "pat_4", name: "Diego Martins", email: "diego.martins@example.com", cpf: "444.444.444-44" },
+    doctor: { id: "doc_4", name: "Dra. Juliana Mendes", crm: "CRM-SP 44444" },
   },
 ];
 

@@ -40,7 +40,12 @@ function fakeAlertNotifier(): AlertNotifier {
 
 function makeService(
   nfseClient: NFSeClient,
-  opts: { emailSender?: EmailSender; appNotifier?: AppNotifier; alertNotifier?: AlertNotifier } = {},
+  opts: {
+    emailSender?: EmailSender;
+    appNotifier?: AppNotifier;
+    alertNotifier?: AlertNotifier;
+    emissionSlaMs?: number;
+  } = {},
 ) {
   const invoiceRepository = new InMemoryInvoiceRepository();
   const patientDoctorRepository = new InMemoryPatientDoctorRepository();
@@ -60,6 +65,7 @@ function makeService(
     auditTrail,
     metrics,
     retryOptions: { maxAttempts: 3, baseDelayMs: 1, sleep: async () => {} },
+    emissionSlaMs: opts.emissionSlaMs,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });
 
@@ -88,6 +94,79 @@ describe("InvoiceEmissionService", () => {
     expect(invoice.nfseNumber).toBe("MARILIA-2026-TEST");
     expect(emailSender.sendInvoiceEmail).toHaveBeenCalledTimes(1);
     expect(appNotifier.notifyInvoiceAvailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("registra quanto tempo levou para emitir a nota (issuedAt/emissionDurationMs + metrica)", async () => {
+    const nfseClient: NFSeClient = {
+      emit: vi.fn(async () => {
+        await delay(30);
+        return successResult;
+      }),
+      cancel: vi.fn(),
+    };
+    const { service, metrics } = makeService(nfseClient);
+
+    const before = Date.now();
+    const invoice = await service.processPayment(makeEvent());
+    const after = Date.now();
+
+    expect(invoice.issuedAt).toBeTruthy();
+    expect(new Date(invoice.issuedAt!).getTime()).toBeGreaterThanOrEqual(before);
+    expect(new Date(invoice.issuedAt!).getTime()).toBeLessThanOrEqual(after);
+    expect(invoice.emissionDurationMs).toBeGreaterThanOrEqual(30);
+    expect(invoice.emissionDurationMs).toBeLessThanOrEqual(after - before);
+
+    const snapshot = metrics.snapshot();
+    expect(snapshot.durations["invoice.time_to_issue_ms"]?.count).toBe(1);
+    expect(snapshot.durations["invoice.time_to_issue_ms"]?.avgMs).toBe(invoice.emissionDurationMs);
+  });
+
+  it("nao preenche issuedAt/emissionDurationMs quando a emissao falha", async () => {
+    const nfseClient: NFSeClient = {
+      emit: vi.fn().mockRejectedValue(new NFSeEmissionError("falha simulada", undefined, false)),
+      cancel: vi.fn(),
+    };
+    const { service } = makeService(nfseClient);
+
+    const invoice = await service.processPayment(makeEvent());
+
+    expect(invoice.status).toBe("failed");
+    expect(invoice.issuedAt).toBeUndefined();
+    expect(invoice.emissionDurationMs).toBeUndefined();
+  });
+
+  it("dispara alerta de SLA quando a emissao demora acima do limite configurado", async () => {
+    const nfseClient: NFSeClient = {
+      emit: vi.fn(async () => {
+        await delay(30);
+        return successResult;
+      }),
+      cancel: vi.fn(),
+    };
+    const { service, alertNotifier } = makeService(nfseClient, { emissionSlaMs: 10 });
+
+    const invoice = await service.processPayment(makeEvent());
+
+    expect(invoice.status).toBe("issued");
+    const slaAlert = (alertNotifier.send as ReturnType<typeof vi.fn>).mock.calls
+      .map(([alert]) => alert)
+      .find((alert) => alert.title === "Emissao de NFS-e acima do SLA esperado");
+    expect(slaAlert).toBeTruthy();
+    expect(slaAlert.severity).toBe("warning");
+    expect(slaAlert.context.emissionDurationMs).toBe(invoice.emissionDurationMs);
+    expect(slaAlert.context.slaMs).toBe(10);
+  });
+
+  it("nao dispara alerta de SLA quando a emissao termina dentro do limite", async () => {
+    const nfseClient: NFSeClient = { emit: vi.fn().mockResolvedValue(successResult), cancel: vi.fn() };
+    const { service, alertNotifier } = makeService(nfseClient, { emissionSlaMs: 5000 });
+
+    await service.processPayment(makeEvent());
+
+    const slaAlert = (alertNotifier.send as ReturnType<typeof vi.fn>).mock.calls
+      .map(([alert]) => alert)
+      .find((alert) => alert.title === "Emissao de NFS-e acima do SLA esperado");
+    expect(slaAlert).toBeUndefined();
   });
 
   it("e idempotente para o mesmo externalId de pagamento", async () => {

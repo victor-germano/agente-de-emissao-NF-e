@@ -81,19 +81,57 @@ O documento lista 5 perguntas explícitas para o dev definir/testar. Status de c
    real do desenho original. Isso é uma decisão de arquitetura para
    discutir na entrevista, não um espaço em branco.
 2. **"Forma de integração com o site da Prefeitura de Marília: API oficial
-   ou RPA/navegador headless?"** — ❌ genuinamente não respondida (não dá
-   para decidir sem acesso real), mas pesquisei o suficiente pra dar um
-   próximo passo concreto: Marília usa o sistema **ISS-Eletrônico**,
-   operado pela **Sigiss/Sigcorp** (`marilia.sigiss.com.br`), com acesso via
-   login/senha (não API key/certificado) mediante cadastro — quem ainda não
-   tem, solicita homologação em `suporte@sigcorp.com.br`. Na prática, porém,
-   o caminho mais comum é **não** integrar direto com a prefeitura: gateways
-   como **Focus NFe**, **eNotas** e **NFE.io** já têm Marília mapeada e
-   expõem uma API REST própria autenticada por token simples — recomendo
-   esse caminho em vez de implementar ABRASF/SOAP na mão. `NFSeClient`
-   isola essa decisão; qualquer uma das abordagens entra sem mudar mais
-   nada. `PrefeituraMariliaMockClient` já simula esse padrão de token (ver
-   `NFSE_API_TOKEN` abaixo), como um ensaio para a integração real.
+   ou RPA/navegador headless?"** — ✅ **existe API oficial, direta, sem
+   necessidade de RPA** — isso corrige uma suposição de uma rodada anterior
+   desta pesquisa. Baixei e li o manual técnico oficial da própria Marília
+   ([`marilia.sigiss.com.br/marilia/download/manual webservice 2.0
+   marilia.pdf`](https://marilia.sigiss.com.br/marilia/download/manual%20webservice%202.0%20marilia.pdf)):
+   é um webservice **SOAP/XML** em
+   `https://marilia.sigiss.com.br/marilia/ws/sigiss_ws.php?wsdl`, com métodos
+   `GerarNota`, `CancelarNota`, `ConsultarNotaValida` e
+   `ConsultarNotaPrestador`. A autenticação **não é certificado digital** —
+   é CCM + CNPJ + senha do prestador, enviados como parâmetros dentro do
+   próprio payload SOAP; o certificado digital é opcional e serve só para
+   assinar o XML da nota já emitida, não para autenticar a chamada. A API já
+   tem um campo nativo de idempotência (`id_sis_legado`) que impede emitir a
+   mesma nota duas vezes — o design deste protótipo (idempotência por
+   `paymentExternalId`) se encaixaria nele quase 1:1.
+
+   Duas ressalvas que mudam a recomendação prática: **(a)** esse manual é de
+   **2012** (versão 1.9); **(b)** a Lei Complementar 214/2025 obriga todo
+   município a operar no Ambiente de Dados Nacional da NFS-e desde
+   01/01/2026, e a própria Marília [passou por instabilidade recente
+   adaptando o sistema local a esse layout
+   nacional](https://marilianoticia.com.br/sistema-da-nota-fiscal-de-servicos-passa-por-atualizacao-e-pode-ter-falhas-em-marilia/).
+   Ou seja: a API SOAP existe e é real, mas construir direto contra uma
+   documentação de 13 anos atrás, numa cidade em transição de padrão fiscal
+   agora, é assumir o risco de manutenção de acompanhar essa mudança sozinho
+   — inclusive re-homologar acesso, já que não há ambiente de
+   homologação/sandbox documentado nesse manual (só produção).
+
+   Por isso, **mantenho a recomendação prática de usar um gateway** — não
+   porque a API direta não exista, mas porque um gateway já absorve o custo
+   de acompanhar essa transição nacional. Comparei os três com preço e
+   sandbox **verificados agora, não estimados**:
+
+   | | **Focus NFe** | **eNotas** | **NFE.io** |
+   |---|---|---|---|
+   | Suporta Marília/Sigiss explicitamente | ✅ [confirmado](https://focusnfe.com.br/blog/como-emitir-nota-fiscal-de-servico-nfse-em-marilia-sp/) (mapeamento de campos Sigiss, NBS, retenção PIS/COFINS/CSLL) | Genérico (sem página dedicada a Marília encontrada) | ✅ [página dedicada a Marília](https://nfe.io/docs/prefeituras-integradas/sao-paulo/marilia-sp-3529005/) |
+   | Preço de entrada | [R$89,90/mês](https://focusnfe.com.br/precos/) (Solo, 1 CNPJ, 100 notas, +R$0,10/nota extra) | [R$137/mês](https://enotass.com.br/notas) (Básico, 50 notas) | ~R$119/mês (120 docs, +R$0,75/doc, taxa de setup + contrato mínimo de 3 meses) |
+   | Sandbox/homologação | ✅ Gratuito e **ilimitado**, sem cartão, URL própria (`homologacao.focusnfe.com.br`) | Existe (Plus/Pro), sandbox citado na doc oficial | Não confirmei detalhes concretos do sandbox na pesquisa — só a existência |
+   | Autenticação (verificado na doc oficial) | **HTTP Basic Auth**: token da empresa como usuário, senha em branco ([doc.focusnfe.com.br/reference/autenticacao](https://doc.focusnfe.com.br/reference/autenticacao.md)) | REST API com chave própria (Plus/Pro) | API REST com Swagger, SDKs oficiais |
+   | Contrato mínimo | Nenhum encontrado | Nenhum encontrado | 3 meses — trava de saída |
+
+   **Recomendação, agora com base verificada**: **Focus NFe** — é o único
+   dos três com suporte a Marília confirmado por escrito pelo próprio
+   provedor, tem o trial mais barato e sem trava de contrato, e a
+   autenticação (HTTP Basic Auth, token como usuário) é simples de
+   implementar. `NFSeClient` isola essa decisão — o adapter real seria uma
+   classe `FocusNfeClient implements NFSeClient` chamando
+   `homologacao.focusnfe.com.br` (testes) ou `api.focusnfe.com.br`
+   (produção). `PrefeituraMariliaMockClient` já simula esse padrão de
+   autenticação (ver `NFSE_API_TOKEN` abaixo) — pronto para trocar assim que
+   houver uma credencial real de homologação.
 3. **"Regras de fallback/erro na emissão"** — ✅ `withRetry` com backoff
    exponencial, `status: "failed"` + `lastError` quando esgota tentativas,
    alertas ativos (`AlertNotifier`), recuperação de notas travadas
@@ -109,32 +147,11 @@ O documento lista 5 perguntas explícitas para o dev definir/testar. Status de c
    consultável via `GET /alerts`, mais métricas (`GET /metrics`) para saúde
    geral.
 
-Resumindo: dos 5 pontos, 3 estão resolvidos por completo (3 e 5, e o 1 na
-medida em que uma arquitetura foi de fato escolhida e implementada), 1 é
-parcial por decisão explícita do próprio documento (4), e 1 continua em
-aberto porque depende de informação que só existe fora deste repositório
-(2 — precisa de acesso real ao sistema da prefeitura).
-
-### Comparativo de gateways de NFS-e (para destravar o ponto 2)
-
-O ponto 2 não fecha com código — precisa de uma conta/credencial real em um
-destes provedores (ou acesso direto à Sigcorp). Pesquisa feita para
-facilitar essa decisão:
-
-| | **Focus NFe** | **eNotas** | **NFE.io** |
-|---|---|---|---|
-| Preço de entrada | R$89,90/mês (100 notas) | R$137/mês (60 notas) + taxa de adesão R$179 | Não divulgado — só sob consulta comercial |
-| Trial/sandbox gratuito | ✅ 30 dias, sem taxa de setup | Ambiente de homologação separado, mas com taxa de adesão já na entrada | Existe, mas foco em contas com 50+ notas/mês |
-| Transparência de preço | Alta — planos públicos na própria página | Média — valores não estão fáceis de achar na própria página | Baixa — preciso falar com vendas |
-| Documentação | Boa; URL de homologação clara (`homologacao.focusnfe.com.br`) + coleção pública no Postman | Portal de dev dedicado (`developer.enotasgw.com.br`) | SDKs oficiais prontos (Node.js, PHP, Ruby) |
-| Perfil de cliente | Startups/pequenas empresas, 1-poucos CNPJs | Empresas com fluxo de notas recorrente (assinaturas, faturas) | Empresas maiores, via time comercial |
-
-**Recomendação**: **Focus NFe** para o estágio atual da VYX — preço
-transparente, trial de 30 dias sem custo de entrada, documentação pública
-suficiente pra implementar e testar sem depender de uma reunião comercial
-antes. Assim que houver credenciais de homologação de qualquer um desses
-provedores, a implementação real do `NFSeClient` é direta — a interface já
-está pronta para receber.
+Resumindo: dos 5 pontos, 4 estão resolvidos (3 e 5 por completo; 1 como
+decisão de arquitetura explícita e defensável; 2 com pesquisa verificada e
+uma recomendação concreta, mesmo sem credencial real em mãos), e 1 é parcial
+por decisão explícita do próprio documento (4). Nenhum ponto ficou sem
+avanço real.
 
 ## Além do documento: fechando lacunas de uma automação completa
 

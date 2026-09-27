@@ -13,6 +13,7 @@ import { requireApiKey } from "./requireApiKey.js";
 import type { InvoiceEmissionService } from "../services/InvoiceEmissionService.js";
 import type { ReconciliationService } from "../services/ReconciliationService.js";
 import type { InvoiceRepository } from "../repositories/InvoiceRepository.js";
+import { logger } from "../lib/logger.js";
 
 export interface NFSeMockControl {
   getFailureRate(): number;
@@ -179,7 +180,7 @@ export function createApp(deps: CreateAppDeps): Express {
 
   // Endpoint de mock para receber a notificacao de webhook do proprio App (uso local/demo).
   app.post("/mock/app-webhook", (req, res) => {
-    console.log("[mock-app-webhook] recebido:", req.body);
+    logger.info("[mock-app-webhook] recebido", { body: req.body });
     res.status(200).json({ received: true });
   });
 
@@ -275,7 +276,7 @@ export function createApp(deps: CreateAppDeps): Express {
       res.status(400).json({ error: "invalid payload", details: err.issues });
       return;
     }
-    console.error(err);
+    logger.error("Erro nao tratado numa requisicao HTTP", { error: err instanceof Error ? err.message : String(err) });
     res.status(500).json({ error: "internal error" });
   });
 

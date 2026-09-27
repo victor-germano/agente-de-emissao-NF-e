@@ -42,6 +42,14 @@ export interface Invoice {
   lastError?: string;
   /** Preenchido quando status === "cancelled" (ex: pagamento estornado). */
   cancellationReason?: string;
+  /** Timestamp exato em que a nota foi emitida (status virou "issued"). Imutavel apos setado. */
+  issuedAt?: string;
+  /**
+   * Tempo entre a chegada do pagamento (createdAt) e a nota sair (issuedAt), em ms -
+   * inclui espera de retentativa, nao so a chamada final que deu certo. Ausente enquanto
+   * a nota nao foi emitida (pending/processing/failed/cancelled sem nunca ter emitido).
+   */
+  emissionDurationMs?: number;
   createdAt: string;
   updatedAt: string;
 }

@@ -19,6 +19,8 @@ export const config = {
     maxAttempts: num(process.env.NFSE_RETRY_MAX_ATTEMPTS, 3),
     baseDelayMs: num(process.env.NFSE_RETRY_BASE_DELAY_MS, 200),
   },
+  /** Limite (ms) de pagamento->nota emitida acima do qual dispara alerta de SLA. */
+  emissionSlaMs: num(process.env.EMISSION_SLA_MS, 5000),
   security: {
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || undefined,
     gateway2WebhookSecret: process.env.GATEWAY2_WEBHOOK_SECRET || undefined,

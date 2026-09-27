@@ -7,13 +7,31 @@ export interface PrefeituraMariliaMockClientOptions {
   failureRate: number;
   latencyMs: number;
   /**
-   * Simula o token de API de um gateway de NFS-e real (ex: Focus NFe,
-   * eNotas, NFE.io — que ja tem integracao pronta com Marilia via
-   * login/senha na Sigiss por baixo dos panos, e expoem um token de API
-   * simples pra quem consome). Se `undefined` (padrao), a checagem de
-   * autenticacao e pulada — comportamento identico ao anterior, para nao
-   * quebrar quem ja usa o mock sem token. Se configurado, todo `emit`/
-   * `cancel` exige que o token bata com `SIMULATED_VALID_API_TOKEN`.
+   * Simula o token de acesso da Focus NFe — pesquisado e verificado (nao
+   * suposto): a API real usa HTTP Basic Auth onde o "usuario" e o token da
+   * empresa e a senha fica em branco (`Authorization: Basic
+   * base64(token+":")`), com URLs separadas para homologacao
+   * (homologacao.focusnfe.com.br, gratis e ilimitado) e producao
+   * (api.focusnfe.com.br) — ver doc.focusnfe.com.br/reference/autenticacao.
+   * A Focus confirma Marilia/Sigiss especificamente (mapeamento de campos,
+   * NBS, retencao PIS/COFINS/CSLL) em focusnfe.com.br/blog (ver README).
+   *
+   * Se `undefined` (padrao), a checagem de autenticacao e pulada — uso
+   * local/demo. Se configurado, todo `emit`/`cancel` exige que o token bata
+   * com `SIMULATED_VALID_API_TOKEN`.
+   *
+   * Alternativa pesquisada e documentada mas NAO implementada aqui:
+   * integrar direto no webservice SOAP da Sigiss
+   * (marilia.sigiss.com.br/marilia/ws/sigiss_ws.php?wsdl, metodos
+   * GerarNota/CancelarNota/ConsultarNotaValida). Essa API oficial nao usa
+   * token nem certificado para autenticar a chamada - usa CCM + CNPJ + senha
+   * do prestador dentro do proprio payload SOAP (certificado digital e
+   * opcional, so pra assinar o XML resultante), e ja tem um campo nativo de
+   * idempotencia (`id_sis_legado`) equivalente ao nosso
+   * `paymentExternalId`. O manual oficial encontrado e de 2012 e a cidade
+   * esta em transicao para o padrao nacional de NFS-e (LC 214/2025,
+   * obrigatorio desde 01/01/2026) — integrar direto contra essa API legada
+   * tem risco real de quebrar quando essa transicao terminar.
    */
   apiToken?: string;
 }
@@ -28,11 +46,14 @@ export const SIMULATED_VALID_API_TOKEN = "sandbox_focusnfe_demo_2026";
  * `apiToken` acima), para que o restante do sistema possa ser testado sem
  * depender do sistema real.
  *
- * Para integrar de verdade, criar um outro `NFSeClient` — seja chamando a
- * API oficial (se existir), automatizando via Playwright, ou (o caminho
- * mais comum na pratica) usando um gateway como Focus NFe/eNotas/NFE.io,
- * que ja tem Marilia integrada — e trocar a instancia usada em
- * `src/index.ts`. Nenhuma outra parte do sistema muda.
+ * Para integrar de verdade (recomendacao pesquisada, nao um chute): criar um
+ * `FocusNfeClient implements NFSeClient` que chama
+ * https://api.focusnfe.com.br (ou homologacao.focusnfe.com.br para testar)
+ * com HTTP Basic Auth (token como usuario, senha em branco), e trocar a
+ * instancia usada em `src/index.ts`. Nenhuma outra parte do sistema muda.
+ * Integrar direto na Sigiss (SOAP, sem gateway) tambem e possivel e esta
+ * documentado acima, mas carrega o risco de manutencao de acompanhar a
+ * transicao pro padrao nacional de NFS-e por conta propria.
  */
 export class PrefeituraMariliaMockClient implements NFSeClient {
   private failureRate: number;

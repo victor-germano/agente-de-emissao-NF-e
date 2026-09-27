@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { logger } from "../../lib/logger.js";
 
 export type AlertSeverity = "warning" | "critical";
 
@@ -40,8 +41,8 @@ export class InMemoryAlertNotifier implements AlertNotifier {
     if (this.alerts.length > this.maxSize) {
       this.alerts.length = this.maxSize;
     }
-    const log = alert.severity === "critical" ? console.error : console.warn;
-    log(`[ALERT:${alert.severity}] ${alert.title} — ${alert.message}`, alert.context ?? "");
+    const log = alert.severity === "critical" ? logger.error : logger.warn;
+    log(`[ALERT:${alert.severity}] ${alert.title} — ${alert.message}`, alert.context);
   }
 
   getRecent(limit = 20): Alert[] {

@@ -20,6 +20,8 @@ export interface InvoiceEmissionServiceDeps {
   auditTrail: AuditTrail;
   metrics: Metrics;
   retryOptions: RetryOptions;
+  /** Limite (ms) de pagamento->nota emitida acima do qual dispara alerta de SLA. Default: 5000. */
+  emissionSlaMs?: number;
   logger?: Pick<Console, "info" | "warn" | "error">;
 }
 
@@ -44,10 +46,12 @@ type PreparedInvoice =
  */
 export class InvoiceEmissionService {
   private readonly logger: Pick<Console, "info" | "warn" | "error">;
+  private readonly emissionSlaMs: number;
   private readonly inFlightBackgroundEmissions = new Set<Promise<unknown>>();
 
   constructor(private readonly deps: InvoiceEmissionServiceDeps) {
     this.logger = deps.logger ?? console;
+    this.emissionSlaMs = deps.emissionSlaMs ?? 5000;
   }
 
   /**
@@ -303,14 +307,24 @@ export class InvoiceEmissionService {
         this.deps.retryOptions,
       );
 
+      const issuedAt = new Date();
+      // Medido a partir de invoice.createdAt (quando o pagamento foi reivindicado), nao de
+      // `startedAt` acima - inclui tempo de espera de retentativa e, no caso de recuperacao
+      // de nota travada, o tempo em que ela ficou presa. E o numero que responde "quanto
+      // tempo demorou pra sair a nota", nao so "quanto durou a ultima chamada que deu certo".
+      const emissionDurationMs = issuedAt.getTime() - new Date(invoice.createdAt).getTime();
+
       const issued = await this.deps.invoiceRepository.update(invoice.id, {
         status: "issued",
         nfseNumber: result.nfseNumber,
         pdfUrl: result.pdfUrl,
         attempts,
+        issuedAt: issuedAt.toISOString(),
+        emissionDurationMs,
       });
       this.deps.metrics.increment("invoices.issued");
       this.deps.metrics.observeDurationMs("nfse.emit.duration_ms", Date.now() - startedAt);
+      this.deps.metrics.observeDurationMs("invoice.time_to_issue_ms", emissionDurationMs);
       await this.deps.auditTrail.record({
         invoiceId: invoice.id,
         eventType: "issued",
@@ -319,6 +333,15 @@ export class InvoiceEmissionService {
         message: `NFS-e ${result.nfseNumber} emitida apos ${attempts} tentativa(s)`,
         context: { attempts },
       });
+
+      if (emissionDurationMs > this.emissionSlaMs) {
+        await this.deps.alertNotifier.send({
+          severity: "warning",
+          title: "Emissao de NFS-e acima do SLA esperado",
+          message: `Invoice ${invoice.id} (pagamento ${invoice.paymentExternalId}) levou ${emissionDurationMs}ms para emitir - acima do limite de ${this.emissionSlaMs}ms configurado`,
+          context: { invoiceId: invoice.id, paymentExternalId: invoice.paymentExternalId, emissionDurationMs, slaMs: this.emissionSlaMs },
+        });
+      }
 
       await this.notifyDownstream(issued, patient);
       return issued;

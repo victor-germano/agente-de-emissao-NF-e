@@ -1,4 +1,5 @@
 import type { Patient } from "../../domain/models.js";
+import { logger } from "../../lib/logger.js";
 
 export interface InvoiceEmailPayload {
   patient: Patient;
@@ -24,14 +25,18 @@ export interface EmailSender {
 
 export class ConsoleEmailSender implements EmailSender {
   async sendInvoiceEmail(payload: InvoiceEmailPayload): Promise<void> {
-    console.log(
-      `[email-mock] Enviando NFS-e ${payload.nfseNumber} para ${payload.patient.name} <${payload.patient.email}> (${payload.pdfUrl})`,
-    );
+    logger.info(`[email-mock] Enviando NFS-e ${payload.nfseNumber} para ${payload.patient.name}`, {
+      patientEmail: payload.patient.email,
+      nfseNumber: payload.nfseNumber,
+      pdfUrl: payload.pdfUrl,
+    });
   }
 
   async sendCancellationEmail(payload: CancellationEmailPayload): Promise<void> {
-    console.log(
-      `[email-mock] Enviando aviso de cancelamento da NFS-e ${payload.nfseNumber} para ${payload.patient.name} <${payload.patient.email}> (motivo: ${payload.reason})`,
-    );
+    logger.info(`[email-mock] Enviando aviso de cancelamento da NFS-e ${payload.nfseNumber} para ${payload.patient.name}`, {
+      patientEmail: payload.patient.email,
+      nfseNumber: payload.nfseNumber,
+      reason: payload.reason,
+    });
   }
 }

@@ -14,6 +14,8 @@ interface InvoiceRow {
   attempts: number;
   last_error: string | null;
   cancellation_reason: string | null;
+  issued_at: string | null;
+  emission_duration_ms: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +33,8 @@ function toInvoice(row: InvoiceRow): Invoice {
     attempts: row.attempts,
     lastError: row.last_error ?? undefined,
     cancellationReason: row.cancellation_reason ?? undefined,
+    issuedAt: row.issued_at ?? undefined,
+    emissionDurationMs: row.emission_duration_ms ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -49,6 +53,8 @@ function toRow(invoice: Invoice): InvoiceRow {
     attempts: invoice.attempts,
     last_error: invoice.lastError ?? null,
     cancellation_reason: invoice.cancellationReason ?? null,
+    issued_at: invoice.issuedAt ?? null,
+    emission_duration_ms: invoice.emissionDurationMs ?? null,
     created_at: invoice.createdAt,
     updated_at: invoice.updatedAt,
   };
@@ -81,6 +87,8 @@ export class SupabaseInvoiceRepository implements InvoiceRepository {
     if (patch.lastError !== undefined) row.last_error = patch.lastError;
     if (patch.cancellationReason !== undefined) row.cancellation_reason = patch.cancellationReason;
     if (patch.doctorId !== undefined) row.doctor_id = patch.doctorId;
+    if (patch.issuedAt !== undefined) row.issued_at = patch.issuedAt;
+    if (patch.emissionDurationMs !== undefined) row.emission_duration_ms = patch.emissionDurationMs;
 
     const { data, error } = await this.client.from("invoices").update(row).eq("id", id).select().single();
     if (error) throw new Error(`Falha ao atualizar invoice ${id} no Supabase: ${error.message}`);

@@ -1,3 +1,5 @@
+import { logger } from "../../lib/logger.js";
+
 export interface InvoiceAvailableNotification {
   invoiceId: string;
   patientId: string;
@@ -23,7 +25,10 @@ export class HttpAppNotifier implements AppNotifier {
 
   async notifyInvoiceAvailable(notification: InvoiceAvailableNotification): Promise<void> {
     if (!this.webhookUrl) {
-      console.log("[app-notifier-mock] Nenhuma APP_NOTIFICATION_WEBHOOK_URL configurada, notificacao apenas logada:", notification);
+      logger.info(
+        "[app-notifier-mock] Nenhuma APP_NOTIFICATION_WEBHOOK_URL configurada, notificacao apenas logada",
+        { ...notification },
+      );
       return;
     }
 

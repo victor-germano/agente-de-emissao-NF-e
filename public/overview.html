@@ -85,6 +85,16 @@
   .card-group-title:first-child { margin-top: 0; }
   .diagram { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.7; white-space: pre; overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
   .footer-links { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); font-size: 13px; }
+
+  @media print {
+    body { background: #fff; color: #111; padding: 12px; }
+    .panel { border-color: #ccc; break-inside: avoid; }
+    .diagram { font-size: 9px; white-space: pre-wrap; overflow-x: visible; }
+    .table-wrap { overflow-x: visible; }
+    table { font-size: 11px; }
+    .cards-grid { break-inside: avoid; }
+    .card { break-inside: avoid; }
+  }
 </style>
 </head>
 <body>
@@ -100,10 +110,10 @@
   </div>
 
   <section class="stats-grid">
-    <div class="stat-tile"><div class="stat-value">60</div><div class="stat-label">testes automatizados passando</div></div>
-    <div class="stat-tile"><div class="stat-value">16</div><div class="stat-label">adições além do documento original</div></div>
+    <div class="stat-tile"><div class="stat-value">64</div><div class="stat-label">testes automatizados passando</div></div>
+    <div class="stat-tile"><div class="stat-value">19</div><div class="stat-label">adições além do documento original</div></div>
     <div class="stat-tile"><div class="stat-value">5</div><div class="stat-label">tabelas reais no Supabase</div></div>
-    <div class="stat-tile"><div class="stat-value">3/5</div><div class="stat-label">pontos em aberto do doc. resolvidos</div></div>
+    <div class="stat-tile"><div class="stat-value">4/5</div><div class="stat-label">pontos em aberto do doc. resolvidos</div></div>
   </section>
 
   <section class="panel">
@@ -163,8 +173,8 @@
       <p>Implementada com uma escolha deliberada: o app recebe os webhooks diretamente (sem passar pelo n8n), trazendo idempotência/retry para código testado. Supabase é a peça de persistência real. Vale discutir essa escolha na entrevista.</p>
     </div>
     <div class="doc-point">
-      <div class="doc-title"><span>2. API oficial da Prefeitura ou RPA/headless?</span><span class="verdict open">❌ em aberto</span></div>
-      <p>Não dá para decidir sem acesso real. Pesquisado: Marília usa o sistema ISS-Eletrônico (Sigiss/Sigcorp, login/senha). Recomendação: <strong>Focus NFe</strong> (trial de 30 dias, preço transparente) em vez de integrar direto com a prefeitura — comparativo completo com eNotas e NFE.io no <code>README.md</code>. <code>NFSeClient</code> isola essa decisão; assim que houver credenciais de homologação, a implementação real é direta.</p>
+      <div class="doc-title"><span>2. API oficial da Prefeitura ou RPA/headless?</span><span class="verdict done">✅ pesquisado e respondido</span></div>
+      <p><strong>Existe API oficial, direta, sem necessidade de RPA</strong> — confirmado lendo o manual técnico real da Sigiss/Marília: webservice SOAP em <code>marilia.sigiss.com.br/.../sigiss_ws.php?wsdl</code> (<code>GerarNota</code>, <code>CancelarNota</code>, <code>ConsultarNotaValida</code>), autenticado por CCM+CNPJ+senha no payload (não certificado), com idempotência nativa (<code>id_sis_legado</code>). Mas o manual é de 2012 e a cidade está em transição para o padrão nacional de NFS-e (obrigatório desde 01/01/2026 pela LC 214/2025) — por isso a recomendação prática continua sendo um gateway. Comparei preço/sandbox/documentação real de <strong>Focus NFe</strong>, eNotas e NFE.io (não estimado) — Focus NFe vence: único com suporte a Marília confirmado por escrito, trial grátis e ilimitado, sem trava de contrato. Detalhe completo com fontes no <code>README.md</code>. <code>NFSeClient</code> isola essa decisão; o mock já simula o esquema real de autenticação da Focus NFe (HTTP Basic Auth).</p>
     </div>
     <div class="doc-point">
       <div class="doc-title"><span>3. Regras de fallback/erro na emissão</span><span class="verdict done">✅ resolvida</span></div>
@@ -181,7 +191,7 @@
   </section>
 
   <section class="panel">
-    <h2>16 adições além do documento original</h2>
+    <h2>19 adições além do documento original</h2>
     <p class="subtitle" style="margin-bottom:14px">O documento cobre o caminho feliz. Estas fecham lacunas reais para uma automação de verdade completa e pronta para produção.</p>
 
     <div class="card-group-title">Resiliência do fluxo de emissão</div>
@@ -191,7 +201,8 @@
       <div class="card"><span class="card-num">4</span><h4>Reconciliação Stripe × notas emitidas</h4><p>Compara pagamentos aprovados no gateway com notas existentes, preenchendo o que o webhook não entregou.</p></div>
       <div class="card"><span class="card-num">5</span><h4>Cancelamento por estorno</h4><p><code>charge.refunded</code> localiza a invoice e cancela a NFS-e já emitida, evitando nota órfã.</p></div>
       <div class="card"><span class="card-num">7</span><h4>Corrida na idempotência corrigida</h4><p><code>findOrCreate</code> atômico — testado com <code>Promise.all</code> — elimina duplicidade sob concorrência real.</p></div>
-      <div class="card"><span class="card-num">16</span><h4>Token de API simulado + retry inteligente</h4><p>Erros não-retryable (credencial inválida) param na 1ª tentativa em vez de insistir à toa.</p></div>
+      <div class="card"><span class="card-num">16</span><h4>Token de API simulado + retry inteligente</h4><p>Erros não-retryável (credencial inválida) param na 1ª tentativa em vez de insistir à toa.</p></div>
+      <div class="card"><span class="card-num">19</span><h4>Alerta de SLA de emissão</h4><p>Se <code>emissionDurationMs</code> passar de <code>EMISSION_SLA_MS</code> (default 5s), dispara alerta "warning" mesmo com a nota emitida com sucesso — sinal de degradação antes de virar falha.</p></div>
     </div>
 
     <div class="card-group-title">Segurança &amp; produção</div>
@@ -199,7 +210,8 @@
       <div class="card"><span class="card-num">3</span><h4>Assinatura do webhook Stripe</h4><p>Reimplementa o esquema real (<code>t=timestamp,v1=hmac</code>), ativado via <code>STRIPE_WEBHOOK_SECRET</code>.</p></div>
       <div class="card"><span class="card-num">11</span><h4>Autenticação por API key</h4><p><code>ADMIN_API_KEY</code> protege <code>/invoices</code>, <code>/alerts</code>, <code>/metrics</code>, <code>/debug/*</code>.</p></div>
       <div class="card"><span class="card-num">12</span><h4>Rotas de debug fora de produção</h4><p><code>NODE_ENV=production</code> desabilita <code>/debug/*</code> por completo (404).</p></div>
-      <div class="card"><span class="card-num">14</span><h4>Graceful shutdown</h4><p><code>SIGTERM</code>/<code>SIGINT</code> esperam emissões em background terminarem antes de encerrar.</p></div>
+      <div class="card"><span class="card-num">14</span><h4>Graceful shutdown</h4><p><code>SIGTERM</code>/<code>SIGINT</code> esperam o servidor HTTP drenar (com teto de 5s) e as emissões em background terminarem antes de encerrar.</p></div>
+      <div class="card"><span class="card-num">17</span><h4>Fail-fast em produção</h4><p><code>NODE_ENV=production</code> sem <code>ADMIN_API_KEY</code> ou <code>STRIPE_WEBHOOK_SECRET</code> configurados: o processo recusa subir, em vez de só avisar no log.</p></div>
     </div>
 
     <div class="card-group-title">Persistência &amp; observabilidade</div>
@@ -209,7 +221,8 @@
       <div class="card"><span class="card-num">9</span><h4>Ack rápido no webhook</h4><p>Responde <code>202</code> em "processing" na hora; emissão continua em background.</p></div>
       <div class="card"><span class="card-num">10</span><h4>Métricas básicas</h4><p>Contadores + latência de emissão — <code>GET /metrics</code>.</p></div>
       <div class="card"><span class="card-num">13</span><h4>Logging estruturado</h4><p>JSON por evento em vez de texto solto, pronto para uma ferramenta de observabilidade real.</p></div>
-      <div class="card"><span class="card-num">15</span><h4>Health check real</h4><p>Com Supabase configurado, testa conectividade de verdade e responde <code>503</code> se o banco cair.</p></div>
+      <div class="card"><span class="card-num">15</span><h4>Health check real</h4><p>Testa conectividade real com o Supabase (quando configurado) e também conta notas presas em "processing" há tempo demais — responde <code>503</code> se algo estiver errado, não só "ok" fixo.</p></div>
+      <div class="card"><span class="card-num">18</span><h4>Tempo de emissão rastreado</h4><p>Cada nota guarda <code>issuedAt</code> e <code>emissionDurationMs</code> (do pagamento até a nota sair, incluindo retentativa) — visível por nota em <code>GET /invoices</code> e agregado em <code>GET /metrics</code>, persistido no Supabase.</p></div>
     </div>
   </section>
 
@@ -233,7 +246,7 @@
     <h2>Stack e como verificar</h2>
     <p><strong>Stack:</strong> Node.js + TypeScript, Express, Zod, Vitest, Supabase (Postgres real) — sem framework de frontend, painel em HTML/CSS/JS puro.</p>
     <p><strong>Rodar:</strong> <code>npm install</code> → <code>npm run dev</code> → <a href="/index.html">painel de simulação</a>.</p>
-    <p><strong>Verificar:</strong> <code>npm run typecheck</code>, <code>npm test</code> (60 testes), ou <code>bash scripts/demo.sh</code> para a simulação automática completa de ponta a ponta.</p>
+    <p><strong>Verificar:</strong> <code>npm run typecheck</code>, <code>npm test</code> (64 testes), ou <code>bash scripts/demo.sh</code> para a simulação automática completa de ponta a ponta.</p>
   </section>
 
   <div class="footer-links">
