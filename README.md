@@ -1,5 +1,7 @@
 # Agente de IA — Emissor NF-e
 
+> O protótipo de emissão de **NFS-e** em Node.js/TypeScript, que antes ficava no branch `prototipo-vyx-nodejs` deste repositório, agora tem repositório próprio: [agente-emissao-nfse](https://github.com/victor-germano/agente-emissao-nfse).
+
 > Projeto em desenvolvimento para automação de emissão de Nota Fiscal Eletrônica (NF-e), construído com apoio do Claude Code. Objetivo final: validar dados, gerar o XML no padrão SEFAZ, assinar digitalmente, transmitir e entregar o PDF ao destinatário.
 
 ---
