@@ -72,7 +72,7 @@ Geração do DANFE em PDF + envio          [planejado]
 ### Instalação
 
 ```bash
-git clone https://github.com/vgermano1711/agente-de-emissao-NF-e.git
+git clone https://github.com/victor-germano/agente-de-emissao-NF-e.git
 cd agente-de-emissao-NF-e
 
 python -m venv venv
@@ -171,7 +171,7 @@ agente-de-emissao-NF-e/
 
 **Victor Germano** — Desenvolvedor Web Full Stack, IA & Automação
 
-- Portfólio: [vgermano1711.github.io/portfolio-germano-dev](https://vgermano1711.github.io/portfolio-germano-dev)
+- Portfólio: [victor-germano.github.io/portfolio-germano-dev](https://victor-germano.github.io/portfolio-germano-dev)
 - E-mail: dev.germanoo@gmail.com
 - LinkedIn: [linkedin.com/in/victor-germano-65787b2b1](https://linkedin.com/in/victor-germano-65787b2b1)
 
